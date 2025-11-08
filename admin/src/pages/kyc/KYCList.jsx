@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useLocation } from 'react-router-dom';
 import { kycAPI } from '../../services/api';
 import {
   CheckCircleIcon,
@@ -14,10 +14,11 @@ const KYCList = () => {
   const [loading, setLoading] = useState(true);
   const [searchTerm, setSearchTerm] = useState('');
   const [filterStatus, setFilterStatus] = useState('all');
+  const location = useLocation();
 
   useEffect(() => {
     loadProfiles();
-  }, []);
+  }, [location.pathname]);
 
   const loadProfiles = async () => {
     try {

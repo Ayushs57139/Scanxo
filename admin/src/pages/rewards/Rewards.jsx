@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { useLocation } from 'react-router-dom';
 import { rewardsAPI } from '../../services/api';
 import { StarIcon, PencilIcon, TrashIcon, PlusIcon } from '@heroicons/react/24/outline';
 
@@ -18,11 +19,12 @@ const Rewards = () => {
     tier: 'Bronze',
     status: 'active',
   });
+  const location = useLocation();
 
   useEffect(() => {
     loadRewards();
     loadHistory();
-  }, []);
+  }, [location.pathname]);
 
   useEffect(() => {
     if (filterType === 'all') {

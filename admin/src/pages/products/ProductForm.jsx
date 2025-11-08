@@ -9,6 +9,7 @@ const ProductForm = () => {
 
   const [formData, setFormData] = useState({
     name: '',
+    sku: '',
     category: '',
     price: '',
     retailPrice: '',
@@ -52,6 +53,7 @@ const ProductForm = () => {
       if (product) {
         setFormData({
           name: product.name || '',
+          sku: product.sku || '',
           category: product.category || '',
           price: product.price || '',
           retailPrice: product.retailPrice || '',
@@ -125,6 +127,19 @@ const ProductForm = () => {
               required
               value={formData.name}
               onChange={(e) => setFormData({ ...formData, name: e.target.value })}
+              className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary focus:border-transparent"
+            />
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-2">
+              SKU
+            </label>
+            <input
+              type="text"
+              value={formData.sku}
+              onChange={(e) => setFormData({ ...formData, sku: e.target.value })}
+              placeholder="Auto-generated if empty"
               className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary focus:border-transparent"
             />
           </div>

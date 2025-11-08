@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { useLocation } from 'react-router-dom';
 import { categoriesAPI } from '../../services/api';
 import { PlusIcon, PencilIcon, TrashIcon } from '@heroicons/react/24/outline';
 
@@ -8,10 +9,11 @@ const Categories = () => {
   const [showForm, setShowForm] = useState(false);
   const [editingCategory, setEditingCategory] = useState(null);
   const [formData, setFormData] = useState({ name: '', icon: '' });
+  const location = useLocation();
 
   useEffect(() => {
     loadCategories();
-  }, []);
+  }, [location.pathname]);
 
   const loadCategories = async () => {
     try {

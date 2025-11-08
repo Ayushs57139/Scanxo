@@ -8,7 +8,7 @@ import {
   ArrowLeftIcon,
   DocumentIcon,
   BuildingOfficeIcon,
-  ReceiptIcon,
+  ReceiptPercentIcon,
   CreditCardIcon,
 } from '@heroicons/react/24/outline';
 
@@ -160,7 +160,7 @@ const KYCDetail = () => {
               { id: 'profile', label: 'Profile', icon: DocumentIcon },
               { id: 'documents', label: 'Documents', icon: DocumentIcon },
               { id: 'business', label: 'Business License', icon: BuildingOfficeIcon },
-              { id: 'gst', label: 'GST Info', icon: ReceiptIcon },
+              { id: 'gst', label: 'GST Info', icon: ReceiptPercentIcon },
               { id: 'credit', label: 'Credit Limit', icon: CreditCardIcon },
             ].map((tab) => (
               <button

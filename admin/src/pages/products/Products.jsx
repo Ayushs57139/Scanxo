@@ -1,16 +1,17 @@
 import React, { useState, useEffect } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useLocation } from 'react-router-dom';
 import { productsAPI } from '../../services/api';
-import { PlusIcon, PencilIcon, TrashIcon } from '@heroicons/react/24/outline';
+import { PlusIcon, PencilIcon, TrashIcon, CubeIcon } from '@heroicons/react/24/outline';
 
 const Products = () => {
   const [products, setProducts] = useState([]);
   const [loading, setLoading] = useState(true);
   const [searchTerm, setSearchTerm] = useState('');
+  const location = useLocation();
 
   useEffect(() => {
     loadProducts();
-  }, []);
+  }, [location.pathname]);
 
   const loadProducts = async () => {
     try {
@@ -126,8 +127,8 @@ const Products = () => {
                       {product.category || 'N/A'}
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap">
-                      <div className="text-sm text-gray-900">₹{product.price?.toFixed(2)}</div>
-                      <div className="text-sm text-gray-500">Retail: ₹{product.retailPrice?.toFixed(2)}</div>
+                      <div className="text-sm text-gray-900">₹{Number(product.price || 0).toFixed(2)}</div>
+                      <div className="text-sm text-gray-500">Retail: ₹{Number(product.retailPrice || 0).toFixed(2)}</div>
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
                       {product.moq || 'N/A'} {product.unit || ''}
@@ -146,6 +147,13 @@ const Products = () => {
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap text-sm font-medium">
                       <div className="flex space-x-2">
+                        <Link
+                          to={`/products/catalog/${product.id}`}
+                          className="text-blue-600 hover:text-blue-800"
+                          title="Catalog Service"
+                        >
+                          <CubeIcon className="h-5 w-5" />
+                        </Link>
                         <Link
                           to={`/products/edit/${product.id}`}
                           className="text-primary hover:text-primary-dark"

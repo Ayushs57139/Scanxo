@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { useLocation } from 'react-router-dom';
 import { bannersAPI } from '../../services/api';
 import { PlusIcon, PencilIcon, TrashIcon } from '@heroicons/react/24/outline';
 
@@ -15,10 +16,11 @@ const Banners = () => {
     color: '#1E3A8A',
     isSpecialOffer: false,
   });
+  const location = useLocation();
 
   useEffect(() => {
     loadBanners();
-  }, []);
+  }, [location.pathname]);
 
   const loadBanners = async () => {
     try {

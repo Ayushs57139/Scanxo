@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { useLocation } from 'react-router-dom';
 import { distributorsAPI } from '../../services/api';
 import { PlusIcon, PencilIcon, TrashIcon } from '@heroicons/react/24/outline';
 
@@ -23,10 +24,11 @@ const Distributors = () => {
     priority: 0,
     status: 'active',
   });
+  const location = useLocation();
 
   useEffect(() => {
     loadDistributors();
-  }, []);
+  }, [location.pathname]);
 
   const loadDistributors = async () => {
     try {

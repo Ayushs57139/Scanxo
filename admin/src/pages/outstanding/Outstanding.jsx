@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { useLocation } from 'react-router-dom';
 import { outstandingAPI } from '../../services/api';
 import { PencilIcon, TrashIcon, PlusIcon, CurrencyDollarIcon } from '@heroicons/react/24/outline';
 
@@ -28,11 +29,12 @@ const Outstanding = () => {
     transactionId: '',
     description: '',
   });
+  const location = useLocation();
 
   useEffect(() => {
     loadOutstanding();
     loadSummary();
-  }, [statusFilter]);
+  }, [statusFilter, location.pathname]);
 
   useEffect(() => {
     if (showHistory) {

@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { useLocation } from 'react-router-dom';
 import { statsAPI } from '../services/api';
 import {
   ShoppingBagIcon,
@@ -17,10 +18,11 @@ const Dashboard = () => {
     recentOrders: [],
   });
   const [loading, setLoading] = useState(true);
+  const location = useLocation();
 
   useEffect(() => {
     loadStats();
-  }, []);
+  }, [location.pathname]);
 
   const loadStats = async () => {
     try {

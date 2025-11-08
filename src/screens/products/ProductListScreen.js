@@ -8,6 +8,7 @@ import {
   TextInput,
   ActivityIndicator,
   Alert,
+  RefreshControl,
 } from 'react-native';
 import { MaterialIcons as Icon } from '@expo/vector-icons';
 import colors from '../../constants/colors';
@@ -23,6 +24,7 @@ const ProductListScreen = ({ navigation, route }) => {
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedCategory, setSelectedCategory] = useState(route.params?.category || null);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
 
   useEffect(() => {
     loadProducts();
@@ -66,6 +68,12 @@ const ProductListScreen = ({ navigation, route }) => {
       filterProducts(dummyProducts);
       setLoading(false);
     }
+  };
+
+  const onRefresh = async () => {
+    setRefreshing(true);
+    await loadProducts();
+    setRefreshing(false);
   };
 
   const filterProducts = (productsList) => {
@@ -157,6 +165,9 @@ const ProductListScreen = ({ navigation, route }) => {
       ) : (
         <FlatList
           data={filteredProducts}
+          refreshControl={
+            <RefreshControl refreshing={refreshing} onRefresh={onRefresh} />
+          }
           renderItem={({ item }) => (
             <ProductCard
               product={item}

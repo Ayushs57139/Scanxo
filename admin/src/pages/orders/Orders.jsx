@@ -1,17 +1,19 @@
 import React, { useState, useEffect } from 'react';
+import { useLocation } from 'react-router-dom';
 import { ordersAPI } from '../../services/api';
 
 const Orders = () => {
   const [orders, setOrders] = useState([]);
   const [loading, setLoading] = useState(true);
+  const location = useLocation();
 
   useEffect(() => {
     loadOrders();
-  }, []);
+  }, [location.pathname]);
 
   const loadOrders = async () => {
     try {
-      const data = await ordersAPI.getAll();
+      const data = await ordersAPI.getCustomerOrders();
       setOrders(data);
     } catch (error) {
       console.error('Error loading orders:', error);
@@ -22,9 +24,10 @@ const Orders = () => {
 
   const handleStatusChange = async (orderId, newStatus) => {
     try {
-      await ordersAPI.updateStatus(orderId, newStatus);
+      await ordersAPI.updateOrderStatus(orderId, { status: newStatus });
       loadOrders();
     } catch (error) {
+      console.error('Error updating order status:', error);
       alert('Error updating order status');
     }
   };
@@ -88,7 +91,7 @@ const Orders = () => {
                       {order.items?.length || 0} items
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">
-                      ₹{order.total?.toLocaleString() || '0'}
+                      ₹{Number(order.finalAmount || order.totalAmount || order.total || 0).toLocaleString()}
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap">
                       <span className={`px-2 py-1 text-xs font-semibold rounded-full ${

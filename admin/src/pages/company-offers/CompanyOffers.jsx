@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { useLocation } from 'react-router-dom';
 import { companyOffersAPI } from '../../services/api';
 import { PlusIcon, PencilIcon, TrashIcon } from '@heroicons/react/24/outline';
 
@@ -23,10 +24,11 @@ const CompanyOffers = () => {
     applicableCategories: [],
     applicableProducts: [],
   });
+  const location = useLocation();
 
   useEffect(() => {
     loadOffers();
-  }, []);
+  }, [location.pathname]);
 
   const loadOffers = async () => {
     try {

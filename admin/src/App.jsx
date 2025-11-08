@@ -15,6 +15,17 @@ import Settings from './pages/Settings';
 import KYCList from './pages/kyc/KYCList';
 import KYCDetail from './pages/kyc/KYCDetail';
 import CompanyOffers from './pages/company-offers/CompanyOffers';
+import Catalog from './pages/catalog/Catalog';
+import CatalogService from './pages/catalog/CatalogService';
+import InventoryService from './pages/inventory/InventoryService';
+import OrderPOService from './pages/orders-po/OrderPOService';
+import Pricing from './pages/pricing/Pricing';
+import DiscountRules from './pages/pricing/DiscountRules';
+import SlabPricing from './pages/pricing/SlabPricing';
+import PromoCodes from './pages/pricing/PromoCodes';
+import TaxRules from './pages/pricing/TaxRules';
+import CreditLimits from './pages/pricing/CreditLimits';
+import PaymentTerms from './pages/pricing/PaymentTerms';
 import Layout from './components/Layout';
 
 function App() {
@@ -42,6 +53,10 @@ function App() {
           <Route path="products" element={<Products />} />
           <Route path="products/new" element={<ProductForm />} />
           <Route path="products/edit/:id" element={<ProductForm />} />
+          <Route path="products/catalog/:id" element={<CatalogService />} />
+          <Route path="catalog" element={<Catalog />} />
+          <Route path="inventory" element={<InventoryService />} />
+          <Route path="orders-po" element={<OrderPOService />} />
           <Route path="categories" element={<Categories />} />
           <Route path="banners" element={<Banners />} />
           <Route path="orders" element={<Orders />} />
@@ -52,6 +67,13 @@ function App() {
           <Route path="company-offers" element={<CompanyOffers />} />
           <Route path="kyc" element={<KYCList />} />
           <Route path="kyc/:id" element={<KYCDetail />} />
+          <Route path="pricing" element={<Pricing />} />
+          <Route path="pricing/discount-rules" element={<DiscountRules />} />
+          <Route path="pricing/slab-pricing" element={<SlabPricing />} />
+          <Route path="pricing/promo-codes" element={<PromoCodes />} />
+          <Route path="pricing/tax-rules" element={<TaxRules />} />
+          <Route path="pricing/credit-limits" element={<CreditLimits />} />
+          <Route path="pricing/payment-terms" element={<PaymentTerms />} />
           <Route path="settings" element={<Settings />} />
         </Route>
       </Routes>

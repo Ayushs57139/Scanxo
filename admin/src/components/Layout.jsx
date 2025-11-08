@@ -14,6 +14,10 @@ import {
   ShieldCheckIcon,
   StarIcon,
   TicketIcon,
+  CubeIcon,
+  BuildingStorefrontIcon,
+  ShoppingCartIcon,
+  CurrencyDollarIcon,
 } from '@heroicons/react/24/outline';
 
 const Layout = ({ setIsAuthenticated }) => {
@@ -30,6 +34,9 @@ const Layout = ({ setIsAuthenticated }) => {
   const navigation = [
     { name: 'Dashboard', href: '/dashboard', icon: HomeIcon },
     { name: 'Products', href: '/products', icon: ShoppingBagIcon },
+    { name: 'Catalog Service', href: '/catalog', icon: CubeIcon },
+    { name: 'Inventory Service', href: '/inventory', icon: BuildingStorefrontIcon },
+    { name: 'Order / PO Service', href: '/orders-po', icon: ShoppingCartIcon },
     { name: 'Categories', href: '/categories', icon: TagIcon },
     { name: 'Banners', href: '/banners', icon: PhotoIcon },
     { name: 'Company Offers', href: '/company-offers', icon: TicketIcon },
@@ -39,6 +46,7 @@ const Layout = ({ setIsAuthenticated }) => {
     { name: 'Rewards', href: '/rewards', icon: StarIcon },
     { name: 'Outstanding', href: '/outstanding', icon: ReceiptPercentIcon },
     { name: 'KYC Verification', href: '/kyc', icon: ShieldCheckIcon },
+    { name: 'Pricing / Scheme', href: '/pricing', icon: CurrencyDollarIcon },
     { name: 'Settings', href: '/settings', icon: Cog6ToothIcon },
   ];
 

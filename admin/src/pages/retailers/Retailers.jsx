@@ -1,14 +1,16 @@
 import React, { useState, useEffect } from 'react';
+import { useLocation } from 'react-router-dom';
 import { retailersAPI } from '../../services/api';
 import { TrashIcon } from '@heroicons/react/24/outline';
 
 const Retailers = () => {
   const [retailers, setRetailers] = useState([]);
   const [loading, setLoading] = useState(true);
+  const location = useLocation();
 
   useEffect(() => {
     loadRetailers();
-  }, []);
+  }, [location.pathname]);
 
   const loadRetailers = async () => {
     try {

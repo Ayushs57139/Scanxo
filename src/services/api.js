@@ -785,6 +785,82 @@ export const authAPI = {
   },
 };
 
+// Pricing API
+export const pricingAPI = {
+  // Calculate pricing
+  calculatePricing: async (userId, items, promoCode = null, stateCode = null) => {
+    try {
+      const res = await fetch(`${API_BASE_URL}/pricing/calculate`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          userId,
+          items,
+          promoCode,
+          stateCode,
+        }),
+      });
+      if (!res.ok) {
+        const error = await res.json();
+        throw new Error(error.error || 'Failed to calculate pricing');
+      }
+      return await res.json();
+    } catch (error) {
+      console.error('Error calculating pricing:', error);
+      throw error;
+    }
+  },
+
+  // Validate promo code
+  validatePromoCode: async (code, userId, orderAmount, productIds = [], categoryIds = []) => {
+    try {
+      const res = await fetch(`${API_BASE_URL}/promo-codes/validate`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          code,
+          userId,
+          orderAmount,
+          productIds,
+          categoryIds,
+        }),
+      });
+      if (!res.ok) {
+        const error = await res.json();
+        throw new Error(error.error || 'Invalid promo code');
+      }
+      return await res.json();
+    } catch (error) {
+      console.error('Error validating promo code:', error);
+      throw error;
+    }
+  },
+
+  // Get credit limit
+  getCreditLimit: async (userId) => {
+    try {
+      const res = await fetch(`${API_BASE_URL}/credit-limits/${userId}`, {
+        method: 'GET',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+      });
+      if (!res.ok) {
+        // Credit limit might not exist, return null
+        return null;
+      }
+      return await res.json();
+    } catch (error) {
+      console.error('Error fetching credit limit:', error);
+      return null;
+    }
+  },
+};
+
 // Notifications API
 export const notificationsAPI = {
   getByUserId: async (userId, unreadOnly = false) => {

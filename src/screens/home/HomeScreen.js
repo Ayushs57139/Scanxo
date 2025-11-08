@@ -9,6 +9,7 @@ import {
   FlatList,
   Dimensions,
   ActivityIndicator,
+  RefreshControl,
 } from 'react-native';
 import { MaterialIcons as Icon } from '@expo/vector-icons';
 import colors from '../../constants/colors';
@@ -34,6 +35,7 @@ const HomeScreen = ({ navigation }) => {
       .slice(0, 3);
   });
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [currentBannerIndex, setCurrentBannerIndex] = useState(0);
   const bannerScrollRef = useRef(null);
   const [exploreBannerIndex, setExploreBannerIndex] = useState(0);
@@ -225,6 +227,13 @@ const HomeScreen = ({ navigation }) => {
     setCartCount(totalItems);
   };
 
+  const onRefresh = async () => {
+    setRefreshing(true);
+    await loadData();
+    await loadCartCount();
+    setRefreshing(false);
+  };
+
   const handleAddToCart = async (product) => {
     const moq = product.moq || 100; // Default MOQ for B2B
     Alert.alert(
@@ -329,7 +338,13 @@ const HomeScreen = ({ navigation }) => {
         </View>
       </View>
 
-      <ScrollView showsVerticalScrollIndicator={false} style={styles.scrollView}>
+      <ScrollView 
+        showsVerticalScrollIndicator={false} 
+        style={styles.scrollView}
+        refreshControl={
+          <RefreshControl refreshing={refreshing} onRefresh={onRefresh} />
+        }
+      >
         {/* Search Bar */}
         <View style={styles.searchBarContainer}>
           <TouchableOpacity
