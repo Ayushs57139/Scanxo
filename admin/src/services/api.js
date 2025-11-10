@@ -557,6 +557,14 @@ export const retailersAPI = {
     const response = await api.delete(`/retailers/${id}`);
     return response.data;
   },
+  approve: async (id, action, approvedBy, rejectionReason = null) => {
+    const response = await api.put(`/retailers/${id}/approve`, {
+      action,
+      approvedBy,
+      rejectionReason,
+    });
+    return response.data;
+  },
 };
 
 // Company Offers API
@@ -791,6 +799,339 @@ export const outstandingAPI = {
       description,
       paymentDate,
     });
+    return response.data;
+  },
+};
+
+// Payment/Finance Module API
+// Shipments & Logistics API
+export const shipmentsAPI = {
+  // Shipments
+  getAll: async (params = {}) => {
+    const queryParams = new URLSearchParams();
+    if (params.orderId) queryParams.append('orderId', params.orderId);
+    if (params.status) queryParams.append('status', params.status);
+    if (params.logisticsPartner) queryParams.append('logisticsPartner', params.logisticsPartner);
+    const queryString = queryParams.toString();
+    const url = queryString ? `/shipments?${queryString}` : '/shipments';
+    const response = await api.get(url);
+    return response.data || [];
+  },
+  getById: async (id) => {
+    const response = await api.get(`/shipments/${id}`);
+    return response.data;
+  },
+  create: async (shipmentData) => {
+    const response = await api.post('/shipments', shipmentData);
+    return response.data;
+  },
+  update: async (id, shipmentData) => {
+    const response = await api.put(`/shipments/${id}`, shipmentData);
+    return response.data;
+  },
+  generateLabel: async (id) => {
+    const response = await api.post(`/shipments/${id}/generate-label`);
+    return response.data;
+  },
+  
+  // Tracking
+  getTracking: async (shipmentId) => {
+    const response = await api.get(`/shipments/${shipmentId}/tracking`);
+    return response.data;
+  },
+  updateTracking: async (shipmentId, trackingData) => {
+    const response = await api.post(`/shipments/${shipmentId}/tracking`, trackingData);
+    return response.data;
+  },
+  syncTracking: async (shipmentId) => {
+    const response = await api.post(`/shipments/${shipmentId}/sync-tracking`);
+    return response.data;
+  },
+  
+  // Logistics Partners
+  getLogisticsPartners: async () => {
+    const response = await api.get('/logistics-partners');
+    return response.data || [];
+  },
+  updateLogisticsPartner: async (id, partnerData) => {
+    const response = await api.put(`/logistics-partners/${id}`, partnerData);
+    return response.data;
+  },
+};
+
+// Analytics & BI API
+export const analyticsAPI = {
+  // Event Ingestion
+  trackEvent: async (eventData) => {
+    const response = await api.post('/analytics/events', eventData);
+    return response.data;
+  },
+  trackEventsBatch: async (events) => {
+    const response = await api.post('/analytics/events/batch', { events });
+    return response.data;
+  },
+  getEvents: async (params = {}) => {
+    const queryParams = new URLSearchParams();
+    if (params.eventType) queryParams.append('eventType', params.eventType);
+    if (params.entityType) queryParams.append('entityType', params.entityType);
+    if (params.startDate) queryParams.append('startDate', params.startDate);
+    if (params.endDate) queryParams.append('endDate', params.endDate);
+    if (params.limit) queryParams.append('limit', params.limit);
+    const queryString = queryParams.toString();
+    const url = queryString ? `/analytics/events?${queryString}` : '/analytics/events';
+    const response = await api.get(url);
+    return response.data || [];
+  },
+  
+  // Dashboards
+  getDashboard: async (type, params = {}) => {
+    const queryParams = new URLSearchParams();
+    if (params.startDate) queryParams.append('startDate', params.startDate);
+    if (params.endDate) queryParams.append('endDate', params.endDate);
+    if (params.period) queryParams.append('period', params.period);
+    const queryString = queryParams.toString();
+    const url = queryString 
+      ? `/analytics/dashboard/${type}?${queryString}` 
+      : `/analytics/dashboard/${type}`;
+    const response = await api.get(url);
+    return response.data || {};
+  },
+  getSalesDashboard: async (params = {}) => {
+    return analyticsAPI.getDashboard('sales', params);
+  },
+  getInventoryDashboard: async (params = {}) => {
+    return analyticsAPI.getDashboard('inventory', params);
+  },
+  getOrdersDashboard: async (params = {}) => {
+    return analyticsAPI.getDashboard('orders', params);
+  },
+  getReceivablesDashboard: async (params = {}) => {
+    return analyticsAPI.getDashboard('receivables', params);
+  },
+  getOverviewDashboard: async (params = {}) => {
+    return analyticsAPI.getDashboard('overview', params);
+  },
+};
+
+export const paymentAPI = {
+  // Payment Gateways
+  getGateways: async () => {
+    const response = await api.get('/payment-gateways');
+    return response.data;
+  },
+  getGateway: async (id) => {
+    const response = await api.get(`/payment-gateways/${id}`);
+    return response.data;
+  },
+  createGateway: async (gateway) => {
+    const response = await api.post('/payment-gateways', gateway);
+    return response.data;
+  },
+  updateGateway: async (id, gateway) => {
+    const response = await api.put(`/payment-gateways/${id}`, gateway);
+    return response.data;
+  },
+  deleteGateway: async (id) => {
+    const response = await api.delete(`/payment-gateways/${id}`);
+    return response.data;
+  },
+
+  // Payment Tokens
+  getTokens: async (userId = null) => {
+    const url = userId ? `/payment-tokens?userId=${userId}` : '/payment-tokens';
+    const response = await api.get(url);
+    return response.data;
+  },
+  createToken: async (token) => {
+    const response = await api.post('/payment-tokens', token);
+    return response.data;
+  },
+  deleteToken: async (id) => {
+    const response = await api.delete(`/payment-tokens/${id}`);
+    return response.data;
+  },
+
+  // Payments
+  getPayments: async (params = {}) => {
+    const queryParams = new URLSearchParams();
+    if (params.userId) queryParams.append('userId', params.userId);
+    if (params.orderId) queryParams.append('orderId', params.orderId);
+    if (params.paymentStatus) queryParams.append('paymentStatus', params.paymentStatus);
+    if (params.gatewayId) queryParams.append('gatewayId', params.gatewayId);
+    if (params.startDate) queryParams.append('startDate', params.startDate);
+    if (params.endDate) queryParams.append('endDate', params.endDate);
+    const queryString = queryParams.toString();
+    const url = `/payments${queryString ? '?' + queryString : ''}`;
+    const response = await api.get(url);
+    return response.data;
+  },
+  getPayment: async (id) => {
+    const response = await api.get(`/payments/${id}`);
+    return response.data;
+  },
+  createPayment: async (payment) => {
+    const response = await api.post('/payments', payment);
+    return response.data;
+  },
+  updatePaymentStatus: async (id, statusData) => {
+    const response = await api.put(`/payments/${id}/status`, statusData);
+    return response.data;
+  },
+  getPaymentStatistics: async (params = {}) => {
+    const queryParams = new URLSearchParams();
+    if (params.startDate) queryParams.append('startDate', params.startDate);
+    if (params.endDate) queryParams.append('endDate', params.endDate);
+    if (params.gatewayId) queryParams.append('gatewayId', params.gatewayId);
+    const queryString = queryParams.toString();
+    const url = `/payments/statistics${queryString ? '?' + queryString : ''}`;
+    const response = await api.get(url);
+    return response.data;
+  },
+
+  // Payment Transactions
+  getTransactions: async (params = {}) => {
+    const queryParams = new URLSearchParams();
+    if (params.paymentId) queryParams.append('paymentId', params.paymentId);
+    if (params.transactionType) queryParams.append('transactionType', params.transactionType);
+    if (params.status) queryParams.append('status', params.status);
+    const response = await api.get(`/payment-transactions?${queryParams.toString()}`);
+    return response.data;
+  },
+  createTransaction: async (transaction) => {
+    const response = await api.post('/payment-transactions', transaction);
+    return response.data;
+  },
+
+  // Refunds
+  getRefunds: async (params = {}) => {
+    const queryParams = new URLSearchParams();
+    if (params.paymentId) queryParams.append('paymentId', params.paymentId);
+    if (params.orderId) queryParams.append('orderId', params.orderId);
+    if (params.userId) queryParams.append('userId', params.userId);
+    if (params.refundStatus) queryParams.append('refundStatus', params.refundStatus);
+    if (params.startDate) queryParams.append('startDate', params.startDate);
+    if (params.endDate) queryParams.append('endDate', params.endDate);
+    const queryString = queryParams.toString();
+    const url = `/refunds${queryString ? '?' + queryString : ''}`;
+    const response = await api.get(url);
+    return response.data;
+  },
+  createRefund: async (refund) => {
+    const response = await api.post('/refunds', refund);
+    return response.data;
+  },
+  updateRefundStatus: async (id, statusData) => {
+    const response = await api.put(`/refunds/${id}/status`, statusData);
+    return response.data;
+  },
+
+  // Invoices
+  getInvoices: async (params = {}) => {
+    const queryParams = new URLSearchParams();
+    if (params.orderId) queryParams.append('orderId', params.orderId);
+    if (params.userId) queryParams.append('userId', params.userId);
+    if (params.invoiceStatus) queryParams.append('invoiceStatus', params.invoiceStatus);
+    if (params.invoiceType) queryParams.append('invoiceType', params.invoiceType);
+    if (params.startDate) queryParams.append('startDate', params.startDate);
+    if (params.endDate) queryParams.append('endDate', params.endDate);
+    const queryString = queryParams.toString();
+    const url = `/invoices${queryString ? '?' + queryString : ''}`;
+    const response = await api.get(url);
+    return response.data;
+  },
+  getInvoice: async (id) => {
+    const response = await api.get(`/invoices/${id}`);
+    return response.data;
+  },
+  createInvoice: async (invoice) => {
+    const response = await api.post('/invoices', invoice);
+    return response.data;
+  },
+  updateInvoice: async (id, invoice) => {
+    const response = await api.put(`/invoices/${id}`, invoice);
+    return response.data;
+  },
+
+  // Reconciliations
+  getReconciliations: async (params = {}) => {
+    const queryParams = new URLSearchParams();
+    if (params.gatewayId) queryParams.append('gatewayId', params.gatewayId);
+    if (params.reconciliationStatus) queryParams.append('reconciliationStatus', params.reconciliationStatus);
+    if (params.startDate) queryParams.append('startDate', params.startDate);
+    if (params.endDate) queryParams.append('endDate', params.endDate);
+    const queryString = queryParams.toString();
+    const url = `/reconciliations${queryString ? '?' + queryString : ''}`;
+    const response = await api.get(url);
+    return response.data;
+  },
+  createReconciliation: async (reconciliation) => {
+    const response = await api.post('/reconciliations', reconciliation);
+    return response.data;
+  },
+  updateReconciliationStatus: async (id, statusData) => {
+    const response = await api.put(`/reconciliations/${id}/status`, statusData);
+    return response.data;
+  },
+
+  // Accounting Exports
+  getAccountingExports: async (params = {}) => {
+    const queryParams = new URLSearchParams();
+    if (params.exportType) queryParams.append('exportType', params.exportType);
+    if (params.exportStatus) queryParams.append('exportStatus', params.exportStatus);
+    if (params.startDate) queryParams.append('startDate', params.startDate);
+    if (params.endDate) queryParams.append('endDate', params.endDate);
+    const queryString = queryParams.toString();
+    const url = `/accounting-exports${queryString ? '?' + queryString : ''}`;
+    const response = await api.get(url);
+    return response.data;
+  },
+  createAccountingExport: async (exportData) => {
+    const response = await api.post('/accounting-exports', exportData);
+    return response.data;
+  },
+  updateAccountingExportStatus: async (id, statusData) => {
+    const response = await api.put(`/accounting-exports/${id}/status`, statusData);
+    return response.data;
+  },
+
+  // Payment Webhooks
+  getWebhooks: async (params = {}) => {
+    const queryParams = new URLSearchParams();
+    if (params.gatewayId) queryParams.append('gatewayId', params.gatewayId);
+    if (params.eventType) queryParams.append('eventType', params.eventType);
+    if (params.isProcessed !== undefined) queryParams.append('isProcessed', params.isProcessed);
+    const response = await api.get(`/payment-webhooks?${queryParams.toString()}`);
+    return response.data;
+  },
+};
+
+// Audit Events API
+export const auditEventsAPI = {
+  getAll: async (params = {}) => {
+    const queryParams = new URLSearchParams();
+    if (params.user) queryParams.append('user', params.user);
+    if (params.action) queryParams.append('action', params.action);
+    if (params.resource) queryParams.append('resource', params.resource);
+    if (params.resource_id) queryParams.append('resource_id', params.resource_id);
+    if (params.startDate) queryParams.append('startDate', params.startDate);
+    if (params.endDate) queryParams.append('endDate', params.endDate);
+    if (params.limit) queryParams.append('limit', params.limit);
+    if (params.offset) queryParams.append('offset', params.offset);
+    const queryString = queryParams.toString();
+    const url = queryString ? `/audit-events?${queryString}` : '/audit-events';
+    const response = await api.get(url);
+    return response.data;
+  },
+  getById: async (id) => {
+    const response = await api.get(`/audit-events/${id}`);
+    return response.data;
+  },
+  create: async (eventData) => {
+    const response = await api.post('/audit-events', eventData);
+    return response.data;
+  },
+  getUniqueFilters: async () => {
+    const response = await api.get('/audit-events/filters/unique');
     return response.data;
   },
 };

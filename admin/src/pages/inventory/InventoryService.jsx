@@ -9,7 +9,12 @@ import {
   CubeIcon,
   ClipboardDocumentListIcon,
   BellIcon,
+  ArrowPathIcon,
+  ExclamationTriangleIcon,
 } from '@heroicons/react/24/outline';
+import axios from 'axios';
+
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:4000/api';
 
 const InventoryService = () => {
   const location = useLocation();
@@ -73,6 +78,19 @@ const InventoryService = () => {
     isPublished: '',
   });
 
+  // Inventory Movements
+  const [movements, setMovements] = useState([]);
+  const [movementFilter, setMovementFilter] = useState({
+    productId: '',
+    warehouseId: '',
+    startDate: '',
+    endDate: '',
+  });
+
+  // Expiry Alerts
+  const [expiryAlerts, setExpiryAlerts] = useState([]);
+  const [expiryDays, setExpiryDays] = useState(30);
+
   useEffect(() => {
     loadData();
   }, [activeTab, location.pathname]);
@@ -94,6 +112,15 @@ const InventoryService = () => {
         break;
       case 'events':
         await loadStockEvents();
+        break;
+      case 'movements':
+        await loadMovements();
+        await loadProducts();
+        await loadWarehouses();
+        break;
+      case 'expiry':
+        await loadExpiryAlerts();
+        await loadWarehouses();
         break;
       default:
         break;
@@ -377,13 +404,50 @@ const InventoryService = () => {
     if (activeTab === 'events') {
       loadStockEvents();
     }
-  }, [eventFilter, activeTab]);
+    if (activeTab === 'movements') {
+      loadMovements();
+    }
+    if (activeTab === 'expiry') {
+      loadExpiryAlerts();
+    }
+  }, [eventFilter, movementFilter, expiryDays, activeTab]);
+
+  const loadMovements = async () => {
+    try {
+      const params = {};
+      if (movementFilter.productId) params.productId = movementFilter.productId;
+      if (movementFilter.warehouseId) params.warehouseId = movementFilter.warehouseId;
+      if (movementFilter.startDate) params.startDate = movementFilter.startDate;
+      if (movementFilter.endDate) params.endDate = movementFilter.endDate;
+      
+      const response = await axios.get(`${API_BASE_URL}/inventory/movements`, { params });
+      setMovements(response.data || []);
+    } catch (error) {
+      console.error('Error loading movements:', error);
+      setMovements([]);
+    }
+  };
+
+  const loadExpiryAlerts = async () => {
+    try {
+      const params = { days: expiryDays };
+      if (movementFilter.warehouseId) params.warehouseId = movementFilter.warehouseId;
+      
+      const response = await axios.get(`${API_BASE_URL}/inventory/expiry-alerts`, { params });
+      setExpiryAlerts(response.data || []);
+    } catch (error) {
+      console.error('Error loading expiry alerts:', error);
+      setExpiryAlerts([]);
+    }
+  };
 
   const tabs = [
     { id: 'warehouses', label: 'Warehouses', icon: BuildingStorefrontIcon },
     { id: 'stock', label: 'Stock Inventory', icon: CubeIcon },
     { id: 'reservations', label: 'PO Reservations', icon: ClipboardDocumentListIcon },
     { id: 'events', label: 'Stock Events', icon: BellIcon },
+    { id: 'movements', label: 'Movements', icon: ArrowPathIcon },
+    { id: 'expiry', label: 'Expiry Alerts', icon: ExclamationTriangleIcon },
   ];
 
   return (
@@ -1222,6 +1286,183 @@ const InventoryService = () => {
                                 Publish
                               </button>
                             )}
+                          </td>
+                        </tr>
+                      ))
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
+          {/* Movements Tab */}
+          {activeTab === 'movements' && (
+            <div>
+              <div className="flex justify-between items-center mb-4">
+                <h3 className="text-lg font-semibold">Inventory Movements</h3>
+                <div className="flex space-x-2">
+                  <select
+                    value={movementFilter.productId}
+                    onChange={(e) => setMovementFilter({ ...movementFilter, productId: e.target.value })}
+                    className="px-3 py-2 border border-gray-300 rounded-lg text-sm"
+                  >
+                    <option value="">All Products</option>
+                    {products.map(p => (
+                      <option key={p.id} value={p.id}>{p.name}</option>
+                    ))}
+                  </select>
+                  <select
+                    value={movementFilter.warehouseId}
+                    onChange={(e) => setMovementFilter({ ...movementFilter, warehouseId: e.target.value })}
+                    className="px-3 py-2 border border-gray-300 rounded-lg text-sm"
+                  >
+                    <option value="">All Warehouses</option>
+                    {warehouses.map(w => (
+                      <option key={w.id} value={w.id}>{w.name}</option>
+                    ))}
+                  </select>
+                  <input
+                    type="date"
+                    value={movementFilter.startDate}
+                    onChange={(e) => setMovementFilter({ ...movementFilter, startDate: e.target.value })}
+                    className="px-3 py-2 border border-gray-300 rounded-lg text-sm"
+                    placeholder="Start Date"
+                  />
+                  <input
+                    type="date"
+                    value={movementFilter.endDate}
+                    onChange={(e) => setMovementFilter({ ...movementFilter, endDate: e.target.value })}
+                    className="px-3 py-2 border border-gray-300 rounded-lg text-sm"
+                    placeholder="End Date"
+                  />
+                </div>
+              </div>
+
+              <div className="overflow-x-auto">
+                <table className="min-w-full divide-y divide-gray-200">
+                  <thead className="bg-gray-50">
+                    <tr>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Date</th>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Product</th>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Warehouse</th>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Type</th>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Quantity</th>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Batch</th>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Reference</th>
+                    </tr>
+                  </thead>
+                  <tbody className="bg-white divide-y divide-gray-200">
+                    {movements.length === 0 ? (
+                      <tr>
+                        <td colSpan="7" className="px-4 py-8 text-center text-gray-500">No movements found</td>
+                      </tr>
+                    ) : (
+                      movements.map((movement) => (
+                        <tr key={movement.id} className="hover:bg-gray-50">
+                          <td className="px-4 py-3 text-sm text-gray-500">
+                            {new Date(movement.movementDate).toLocaleDateString()}
+                          </td>
+                          <td className="px-4 py-3 text-sm text-gray-900">{movement.productName || 'N/A'}</td>
+                          <td className="px-4 py-3 text-sm text-gray-500">{movement.warehouseName || 'N/A'}</td>
+                          <td className="px-4 py-3 text-sm">
+                            <span className={`px-2 py-1 text-xs rounded-full ${
+                              movement.movementType === 'in' ? 'bg-green-100 text-green-800' :
+                              movement.movementType === 'out' ? 'bg-red-100 text-red-800' :
+                              'bg-gray-100 text-gray-800'
+                            }`}>
+                              {movement.movementType?.toUpperCase() || 'N/A'}
+                            </span>
+                          </td>
+                          <td className="px-4 py-3 text-sm text-gray-900">{movement.quantity || 0}</td>
+                          <td className="px-4 py-3 text-sm text-gray-500">{movement.batchNumber || 'N/A'}</td>
+                          <td className="px-4 py-3 text-sm text-gray-500">{movement.referenceNumber || 'N/A'}</td>
+                        </tr>
+                      ))
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
+          {/* Expiry Alerts Tab */}
+          {activeTab === 'expiry' && (
+            <div>
+              <div className="flex justify-between items-center mb-4">
+                <h3 className="text-lg font-semibold">Expiry Alerts</h3>
+                <div className="flex space-x-2 items-center">
+                  <label className="text-sm text-gray-700">Alert Days:</label>
+                  <input
+                    type="number"
+                    value={expiryDays}
+                    onChange={(e) => setExpiryDays(parseInt(e.target.value) || 30)}
+                    min="1"
+                    max="365"
+                    className="w-20 px-3 py-2 border border-gray-300 rounded-lg text-sm"
+                  />
+                  <select
+                    value={movementFilter.warehouseId}
+                    onChange={(e) => setMovementFilter({ ...movementFilter, warehouseId: e.target.value })}
+                    className="px-3 py-2 border border-gray-300 rounded-lg text-sm"
+                  >
+                    <option value="">All Warehouses</option>
+                    {warehouses.map(w => (
+                      <option key={w.id} value={w.id}>{w.name}</option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              <div className="mb-4 bg-yellow-50 border border-yellow-200 rounded-lg p-4">
+                <div className="flex items-center">
+                  <ExclamationTriangleIcon className="h-5 w-5 text-yellow-600 mr-2" />
+                  <span className="text-sm text-yellow-800">
+                    Showing products expiring within {expiryDays} days. Total alerts: {expiryAlerts.length}
+                  </span>
+                </div>
+              </div>
+
+              <div className="overflow-x-auto">
+                <table className="min-w-full divide-y divide-gray-200">
+                  <thead className="bg-gray-50">
+                    <tr>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Product</th>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">SKU</th>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Warehouse</th>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Batch</th>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Quantity</th>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Expiry Date</th>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Days Until Expiry</th>
+                    </tr>
+                  </thead>
+                  <tbody className="bg-white divide-y divide-gray-200">
+                    {expiryAlerts.length === 0 ? (
+                      <tr>
+                        <td colSpan="7" className="px-4 py-8 text-center text-gray-500">No expiry alerts found</td>
+                      </tr>
+                    ) : (
+                      expiryAlerts.map((alert) => (
+                        <tr key={alert.id} className={`hover:bg-gray-50 ${
+                          alert.daysUntilExpiry <= 7 ? 'bg-red-50' :
+                          alert.daysUntilExpiry <= 15 ? 'bg-yellow-50' : ''
+                        }`}>
+                          <td className="px-4 py-3 text-sm font-medium text-gray-900">{alert.productName || 'N/A'}</td>
+                          <td className="px-4 py-3 text-sm text-gray-500">{alert.productSku || 'N/A'}</td>
+                          <td className="px-4 py-3 text-sm text-gray-500">{alert.warehouseName || 'N/A'}</td>
+                          <td className="px-4 py-3 text-sm text-gray-500">{alert.batchNumber || 'N/A'}</td>
+                          <td className="px-4 py-3 text-sm text-gray-900">{alert.quantity || 0}</td>
+                          <td className="px-4 py-3 text-sm text-gray-500">
+                            {alert.expiryDate ? new Date(alert.expiryDate).toLocaleDateString() : 'N/A'}
+                          </td>
+                          <td className="px-4 py-3 text-sm">
+                            <span className={`px-2 py-1 text-xs font-semibold rounded-full ${
+                              alert.daysUntilExpiry <= 7 ? 'bg-red-100 text-red-800' :
+                              alert.daysUntilExpiry <= 15 ? 'bg-yellow-100 text-yellow-800' :
+                              'bg-green-100 text-green-800'
+                            }`}>
+                              {alert.daysUntilExpiry} days
+                            </span>
                           </td>
                         </tr>
                       ))

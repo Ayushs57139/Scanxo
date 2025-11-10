@@ -762,6 +762,49 @@ export const favoritesAPI = {
   },
 };
 
+// Retailer Auth API
+export const retailerAuthAPI = {
+  register: async (registrationData) => {
+    try {
+      const res = await fetch(`${API_BASE_URL}/retailers/register`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(registrationData),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || 'Registration failed');
+      }
+      return data;
+    } catch (error) {
+      console.error('Error registering retailer:', error);
+      throw error;
+    }
+  },
+
+  login: async (phone, password) => {
+    try {
+      const res = await fetch(`${API_BASE_URL}/retailers/login`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ phone, password }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || data.message || 'Login failed');
+      }
+      return data;
+    } catch (error) {
+      console.error('Error logging in retailer:', error);
+      throw error;
+    }
+  },
+};
+
 // Auth API
 export const authAPI = {
   changePassword: async (userId, oldPassword, newPassword) => {

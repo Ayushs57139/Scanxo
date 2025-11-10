@@ -26,6 +26,14 @@ import PromoCodes from './pages/pricing/PromoCodes';
 import TaxRules from './pages/pricing/TaxRules';
 import CreditLimits from './pages/pricing/CreditLimits';
 import PaymentTerms from './pages/pricing/PaymentTerms';
+import Payments from './pages/payments/Payments';
+import Delivery from './pages/delivery/Delivery';
+import Analytics from './pages/analytics/Analytics';
+import AuditEvents from './pages/audit/AuditEvents';
+import BulkImportExport from './pages/products/BulkImportExport';
+import OrderManagement from './pages/orders/OrderManagement';
+import Reconciliations from './pages/payments/Reconciliations';
+import ComplianceReports from './pages/compliance/ComplianceReports';
 import Layout from './components/Layout';
 
 function App() {
@@ -54,12 +62,14 @@ function App() {
           <Route path="products/new" element={<ProductForm />} />
           <Route path="products/edit/:id" element={<ProductForm />} />
           <Route path="products/catalog/:id" element={<CatalogService />} />
+          <Route path="products/bulk-import-export" element={<BulkImportExport />} />
           <Route path="catalog" element={<Catalog />} />
           <Route path="inventory" element={<InventoryService />} />
           <Route path="orders-po" element={<OrderPOService />} />
           <Route path="categories" element={<Categories />} />
           <Route path="banners" element={<Banners />} />
           <Route path="orders" element={<Orders />} />
+          <Route path="orders/management" element={<OrderManagement />} />
           <Route path="distributors" element={<Distributors />} />
           <Route path="retailers" element={<Retailers />} />
           <Route path="rewards" element={<Rewards />} />
@@ -74,6 +84,12 @@ function App() {
           <Route path="pricing/tax-rules" element={<TaxRules />} />
           <Route path="pricing/credit-limits" element={<CreditLimits />} />
           <Route path="pricing/payment-terms" element={<PaymentTerms />} />
+          <Route path="payments" element={<Payments />} />
+          <Route path="payments/reconciliations" element={<Reconciliations />} />
+          <Route path="delivery" element={<Delivery />} />
+          <Route path="analytics" element={<Analytics />} />
+          <Route path="audit-events" element={<AuditEvents />} />
+          <Route path="compliance" element={<ComplianceReports />} />
           <Route path="settings" element={<Settings />} />
         </Route>
       </Routes>

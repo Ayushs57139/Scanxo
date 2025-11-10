@@ -9,10 +9,12 @@ import {
   Platform,
   ScrollView,
   Alert,
+  ActivityIndicator,
 } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { MaterialIcons as Icon } from '@expo/vector-icons';
 import colors from '../../constants/colors';
+import { retailerAuthAPI } from '../../services/api';
 
 const RegisterScreen = ({ navigation }) => {
   const [businessName, setBusinessName] = useState('');
@@ -30,8 +32,9 @@ const RegisterScreen = ({ navigation }) => {
   const [confirmPassword, setConfirmPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [showConfirmPassword, setShowConfirmPassword] = useState(false);
+  const [loading, setLoading] = useState(false);
 
-  const handleRegister = () => {
+  const handleRegister = async () => {
     if (!businessName || !businessType || !gstin || !drugLicense || !contactName || !phone || !email || !address || !city || !state || !pincode || !password || !confirmPassword) {
       Alert.alert('Error', 'Please fill in all required fields');
       return;
@@ -57,8 +60,40 @@ const RegisterScreen = ({ navigation }) => {
       return;
     }
 
-    Alert.alert('Success', 'Retailer registration submitted! Your account will be activated after verification.');
-    navigation.navigate('Login');
+    setLoading(true);
+    try {
+      const registrationData = {
+        businessName,
+        businessType,
+        gstin,
+        drugLicense,
+        contactName,
+        phone,
+        email,
+        address,
+        city,
+        state,
+        pincode,
+        password,
+      };
+
+      const response = await retailerAuthAPI.register(registrationData);
+      
+      Alert.alert(
+        'Registration Successful',
+        'Your account has been registered successfully. Please wait for admin approval before you can login.',
+        [
+          {
+            text: 'OK',
+            onPress: () => navigation.navigate('Login'),
+          },
+        ]
+      );
+    } catch (error) {
+      Alert.alert('Registration Failed', error.message || 'An error occurred during registration. Please try again.');
+    } finally {
+      setLoading(false);
+    }
   };
 
   const businessTypes = ['Pharmacy', 'Medical Store', 'Clinic', 'Hospital Pharmacy', 'Retail Store', 'Chain Store'];
@@ -270,8 +305,16 @@ const RegisterScreen = ({ navigation }) => {
               </TouchableOpacity>
             </View>
 
-            <TouchableOpacity style={styles.registerButton} onPress={handleRegister}>
-              <Text style={styles.registerButtonText}>Register</Text>
+            <TouchableOpacity 
+              style={[styles.registerButton, loading && styles.registerButtonDisabled]} 
+              onPress={handleRegister}
+              disabled={loading}
+            >
+              {loading ? (
+                <ActivityIndicator color={colors.white} />
+              ) : (
+                <Text style={styles.registerButtonText}>Register</Text>
+              )}
             </TouchableOpacity>
 
             <View style={styles.loginContainer}>
@@ -390,6 +433,9 @@ const styles = StyleSheet.create({
     color: colors.white,
     opacity: 0.9,
     marginTop: 8,
+  },
+  registerButtonDisabled: {
+    opacity: 0.6,
   },
 });
 

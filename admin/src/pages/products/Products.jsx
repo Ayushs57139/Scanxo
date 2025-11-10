@@ -51,13 +51,22 @@ const Products = () => {
           <h1 className="text-3xl font-bold text-gray-900">Products</h1>
           <p className="text-gray-600 mt-2">Manage all products in your catalog</p>
         </div>
-        <Link
-          to="/products/new"
-          className="bg-primary text-white px-6 py-3 rounded-lg font-semibold hover:bg-primary-dark transition-colors flex items-center"
-        >
-          <PlusIcon className="h-5 w-5 mr-2" />
-          Add Product
-        </Link>
+        <div className="flex space-x-3">
+          <Link
+            to="/products/bulk-import-export"
+            className="bg-green-600 text-white px-6 py-3 rounded-lg font-semibold hover:bg-green-700 transition-colors flex items-center"
+          >
+            <CubeIcon className="h-5 w-5 mr-2" />
+            Bulk Import/Export
+          </Link>
+          <Link
+            to="/products/new"
+            className="bg-primary text-white px-6 py-3 rounded-lg font-semibold hover:bg-primary-dark transition-colors flex items-center"
+          >
+            <PlusIcon className="h-5 w-5 mr-2" />
+            Add Product
+          </Link>
+        </div>
       </div>
 
       <div className="mb-6">

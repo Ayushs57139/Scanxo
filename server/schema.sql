@@ -66,15 +66,23 @@ CREATE TABLE IF NOT EXISTS orders (
 CREATE TABLE IF NOT EXISTS retailers (
   id INT AUTO_INCREMENT PRIMARY KEY,
   name VARCHAR(255),
-  email VARCHAR(255),
-  phone VARCHAR(50),
+  email VARCHAR(255) UNIQUE,
+  phone VARCHAR(50) UNIQUE,
+  password VARCHAR(255),
   storeName VARCHAR(255),
   storeType VARCHAR(100),
   gstin VARCHAR(50),
   drugLicense VARCHAR(100),
   address JSON,
+  approvalStatus ENUM('pending', 'approved', 'rejected') DEFAULT 'pending',
+  approvedBy VARCHAR(255),
+  approvedAt TIMESTAMP NULL,
+  rejectionReason TEXT,
   createdAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-  updatedAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+  updatedAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  INDEX idx_approvalStatus (approvalStatus),
+  INDEX idx_email (email),
+  INDEX idx_phone (phone)
 );
 
 -- Distributors table
@@ -306,6 +314,24 @@ CREATE TABLE IF NOT EXISTS notifications (
 );
 
 -- Business License, GST Info, and Credit Limit are stored in kyc_profiles as JSON columns
+
+-- Audit / Events table
+CREATE TABLE IF NOT EXISTS audit_events (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  user VARCHAR(255) NOT NULL,
+  action VARCHAR(100) NOT NULL,
+  resource VARCHAR(100) NOT NULL,
+  resource_id VARCHAR(255),
+  details JSON,
+  ip_address VARCHAR(45),
+  user_agent TEXT,
+  timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  INDEX idx_user (user),
+  INDEX idx_action (action),
+  INDEX idx_resource (resource),
+  INDEX idx_resource_id (resource_id),
+  INDEX idx_timestamp (timestamp)
+);
 
 -- Insert dummy products
 INSERT IGNORE INTO products (name, category, price, retailPrice, moq, unit, packSize, pricePerPack, stockQuantity, hsnCode, gstRate, supplier, supplierCode, image, description, volumeDiscounts, discount, isTrending) VALUES

@@ -9,17 +9,20 @@ import {
   Platform,
   ScrollView,
   Alert,
+  ActivityIndicator,
 } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { MaterialIcons as Icon } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import colors from '../../constants/colors';
 import { StorageKeys } from '../../utils/storage';
+import { retailerAuthAPI } from '../../services/api';
 
 const LoginScreen = ({ navigation }) => {
   const [phone, setPhone] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
+  const [loading, setLoading] = useState(false);
 
   const handleLogin = async () => {
     if (!phone || !password) {
@@ -32,26 +35,35 @@ const LoginScreen = ({ navigation }) => {
       return;
     }
 
-    // Simulate login
+    setLoading(true);
     try {
-      const token = 'mock_token_' + Date.now();
-      await AsyncStorage.setItem(StorageKeys.USER_TOKEN, token);
+      const response = await retailerAuthAPI.login(phone, password);
+      
+      // Store token and user data
+      await AsyncStorage.setItem(StorageKeys.USER_TOKEN, response.token);
       await AsyncStorage.setItem(StorageKeys.USER_DATA, JSON.stringify({
-        phone,
-        name: 'Retailer Owner',
-        email: 'retailer@example.com',
-        storeName: 'ABC Pharmacy',
-        storeType: 'Pharmacy',
-        gstin: '27AABCU1234A1Z5',
+        ...response.retailer,
         role: 'retailer',
       }));
+
       // Use reset to clear navigation stack and navigate to MainTabs
       navigation.reset({
         index: 0,
         routes: [{ name: 'MainTabs' }],
       });
     } catch (error) {
-      Alert.alert('Error', 'Login failed. Please try again.');
+      // Check if it's an approval status error
+      if (error.message.includes('pending approval') || error.message.includes('rejected')) {
+        Alert.alert(
+          'Account Not Approved',
+          error.message || 'Your account is pending admin approval. Please wait for approval before logging in.',
+          [{ text: 'OK' }]
+        );
+      } else {
+        Alert.alert('Login Failed', error.message || 'Invalid phone number or password. Please try again.');
+      }
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -111,8 +123,16 @@ const LoginScreen = ({ navigation }) => {
               <Text style={styles.forgotPasswordText}>Forgot Password?</Text>
             </TouchableOpacity>
 
-            <TouchableOpacity style={styles.loginButton} onPress={handleLogin}>
-              <Text style={styles.loginButtonText}>Login</Text>
+            <TouchableOpacity 
+              style={[styles.loginButton, loading && styles.loginButtonDisabled]} 
+              onPress={handleLogin}
+              disabled={loading}
+            >
+              {loading ? (
+                <ActivityIndicator color={colors.white} />
+              ) : (
+                <Text style={styles.loginButtonText}>Login</Text>
+              )}
             </TouchableOpacity>
 
             <View style={styles.divider}>
@@ -261,6 +281,9 @@ const styles = StyleSheet.create({
     color: colors.primary,
     fontSize: 14,
     fontWeight: 'bold',
+  },
+  loginButtonDisabled: {
+    opacity: 0.6,
   },
 });
 

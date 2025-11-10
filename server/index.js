@@ -4,6 +4,7 @@ import { ensureDir } from 'fs-extra';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import multer from 'multer';
+import bcrypt from 'bcrypt';
 import pool from './db.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -149,6 +150,9 @@ function createRoute(table) {
         }
       });
       
+      // Log audit event
+      await logAuditEvent(req, 'CREATE', table, result.insertId.toString(), { created: item });
+      
       res.status(201).json(item);
     } catch (error) {
       console.error(`Error creating ${table}:`, error);
@@ -199,6 +203,9 @@ function updateRoute(table) {
         }
       });
       
+      // Log audit event
+      await logAuditEvent(req, 'UPDATE', table, id.toString(), { updated: item });
+      
       res.json(item);
     } catch (error) {
       console.error(`Error updating ${table}:`, error);
@@ -212,12 +219,49 @@ function deleteRoute(table) {
     try {
       const id = parseInt(req.params.id, 10);
       await pool.execute(`DELETE FROM ${table} WHERE id = ?`, [id]);
+      
+      // Log audit event
+      await logAuditEvent(req, 'DELETE', table, id.toString());
+      
       res.json({ success: true });
     } catch (error) {
       console.error(`Error deleting ${table}:`, error);
       res.status(500).json({ error: 'Database error' });
     }
   };
+}
+
+// Audit logging helper function
+async function logAuditEvent(req, action, resource, resourceId = null, details = null) {
+  try {
+    // Extract user from request (could be from token, session, or header)
+    const user = req.headers['x-user-id'] || req.body?.userId || req.query?.userId || req.user?.id || req.user?.email || 'system';
+    
+    // Extract IP address
+    const ipAddress = req.ip || req.connection.remoteAddress || req.headers['x-forwarded-for'] || 'unknown';
+    
+    // Extract user agent
+    const userAgent = req.headers['user-agent'] || null;
+    
+    // Prepare details object
+    const auditDetails = {
+      ...details,
+      method: req.method,
+      path: req.path,
+      query: req.query,
+      body: req.method === 'GET' ? null : (req.body ? JSON.stringify(req.body).substring(0, 1000) : null) // Limit body size
+    };
+    
+    const detailsJson = auditDetails ? JSON.stringify(auditDetails) : null;
+    
+    await pool.execute(
+      'INSERT INTO audit_events (user, action, resource, resource_id, details, ip_address, user_agent) VALUES (?, ?, ?, ?, ?, ?, ?)',
+      [user, action, resource, resourceId, detailsJson, ipAddress, userAgent]
+    );
+  } catch (error) {
+    // Don't fail the request if audit logging fails
+    console.error('Error logging audit event:', error);
+  }
 }
 
 // Routes
@@ -709,6 +753,564 @@ api.get('/products/search/:query', async (req, res) => {
   }
 });
 
+// Product Bulk Import/Export
+api.get('/products/export/csv', async (req, res) => {
+  try {
+    const [rows] = await pool.execute('SELECT * FROM products ORDER BY id DESC');
+    
+    // Convert to CSV
+    const headers = ['id', 'name', 'category', 'price', 'retailPrice', 'moq', 'unit', 'packSize', 'pricePerPack', 'stockQuantity', 'hsnCode', 'gstRate', 'supplier', 'supplierCode', 'image', 'description', 'discount', 'isTrending', 'createdAt'];
+    const csvRows = [headers.join(',')];
+    
+    rows.forEach(row => {
+      const values = headers.map(header => {
+        let value = row[header] || '';
+        if (typeof value === 'string' && value.includes(',')) {
+          value = `"${value.replace(/"/g, '""')}"`;
+        }
+        return value;
+      });
+      csvRows.push(values.join(','));
+    });
+    
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', 'attachment; filename=products-export.csv');
+    res.send(csvRows.join('\n'));
+  } catch (error) {
+    console.error('Error exporting products:', error);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+api.post('/products/import/csv', async (req, res) => {
+  try {
+    const { csvData } = req.body;
+    if (!csvData) {
+      return res.status(400).json({ error: 'CSV data is required' });
+    }
+    
+    const lines = csvData.split('\n').filter(line => line.trim());
+    if (lines.length < 2) {
+      return res.status(400).json({ error: 'Invalid CSV format' });
+    }
+    
+    const headers = lines[0].split(',').map(h => h.trim().replace(/^"|"$/g, ''));
+    const results = { success: 0, failed: 0, errors: [] };
+    
+    for (let i = 1; i < lines.length; i++) {
+      try {
+        const values = lines[i].split(',').map(v => v.trim().replace(/^"|"$/g, ''));
+        const product = {};
+        
+        headers.forEach((header, index) => {
+          if (values[index] !== undefined) {
+            product[header] = values[index];
+          }
+        });
+        
+        // Convert numeric fields
+        if (product.price) product.price = parseFloat(product.price);
+        if (product.retailPrice) product.retailPrice = parseFloat(product.retailPrice);
+        if (product.moq) product.moq = parseInt(product.moq);
+        if (product.packSize) product.packSize = parseInt(product.packSize);
+        if (product.pricePerPack) product.pricePerPack = parseFloat(product.pricePerPack);
+        if (product.stockQuantity) product.stockQuantity = parseInt(product.stockQuantity);
+        if (product.gstRate) product.gstRate = parseFloat(product.gstRate);
+        if (product.discount) product.discount = parseFloat(product.discount);
+        if (product.isTrending) product.isTrending = product.isTrending === 'true' || product.isTrending === '1';
+        
+        delete product.id; // Don't import IDs
+        delete product.createdAt;
+        delete product.updatedAt;
+        
+        const fields = Object.keys(product).filter(key => key !== 'id');
+        const fieldValues = fields.map(field => product[field]);
+        const placeholders = fields.map(() => '?').join(', ');
+        
+        await pool.execute(
+          `INSERT INTO products (${fields.join(', ')}) VALUES (${placeholders})`,
+          fieldValues
+        );
+        
+        results.success++;
+      } catch (error) {
+        results.failed++;
+        results.errors.push({ line: i + 1, error: error.message });
+      }
+    }
+    
+    res.json(results);
+  } catch (error) {
+    console.error('Error importing products:', error);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+// Inventory Movements & Expiry Alerts
+api.get('/inventory/movements', async (req, res) => {
+  try {
+    const { productId, warehouseId, startDate, endDate, limit = 100 } = req.query;
+    
+    let query = `
+      SELECT 
+        sm.*,
+        p.name as productName,
+        p.sku as productSku,
+        w.name as warehouseName
+      FROM stock_movements sm
+      LEFT JOIN products p ON sm.productId = p.id
+      LEFT JOIN warehouses w ON sm.warehouseId = w.id
+      WHERE 1=1
+    `;
+    const params = [];
+    
+    if (productId) {
+      query += ' AND sm.productId = ?';
+      params.push(productId);
+    }
+    if (warehouseId) {
+      query += ' AND sm.warehouseId = ?';
+      params.push(warehouseId);
+    }
+    if (startDate) {
+      query += ' AND sm.movementDate >= ?';
+      params.push(startDate);
+    }
+    if (endDate) {
+      query += ' AND sm.movementDate <= ?';
+      params.push(endDate);
+    }
+    
+    query += ' ORDER BY sm.movementDate DESC LIMIT ?';
+    params.push(parseInt(limit));
+    
+    const [rows] = await pool.execute(query, params);
+    res.json(rows);
+  } catch (error) {
+    console.error('Error fetching inventory movements:', error);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+api.get('/inventory/expiry-alerts', async (req, res) => {
+  try {
+    const { days = 30, warehouseId } = req.query;
+    const daysInt = parseInt(days);
+    
+    let query = `
+      SELECT 
+        si.*,
+        p.name as productName,
+        p.sku as productSku,
+        w.name as warehouseName,
+        DATEDIFF(si.expiryDate, CURDATE()) as daysUntilExpiry
+      FROM stock_inventory si
+      LEFT JOIN products p ON si.productId = p.id
+      LEFT JOIN warehouses w ON si.warehouseId = w.id
+      WHERE si.expiryDate IS NOT NULL
+        AND si.expiryDate <= DATE_ADD(CURDATE(), INTERVAL ? DAY)
+        AND si.quantity > 0
+    `;
+    const params = [daysInt];
+    
+    if (warehouseId) {
+      query += ' AND si.warehouseId = ?';
+      params.push(warehouseId);
+    }
+    
+    query += ' ORDER BY si.expiryDate ASC';
+    
+    const [rows] = await pool.execute(query, params);
+    res.json(rows);
+  } catch (error) {
+    console.error('Error fetching expiry alerts:', error);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+// Order Returns & Credit Notes
+api.get('/order-returns', async (req, res) => {
+  try {
+    const { orderId, returnStatus, startDate, endDate } = req.query;
+    
+    let query = `
+      SELECT 
+        or.*,
+        co.orderNumber,
+        co.userId,
+        p.name as productName,
+        p.sku as productSku,
+        p.image as productImage
+      FROM order_returns or
+      LEFT JOIN customer_orders co ON or.orderId = co.id
+      LEFT JOIN products p ON or.productId = p.id
+      WHERE 1=1
+    `;
+    const params = [];
+    
+    if (orderId) {
+      query += ' AND or.orderId = ?';
+      params.push(orderId);
+    }
+    if (returnStatus) {
+      query += ' AND or.returnStatus = ?';
+      params.push(returnStatus);
+    }
+    if (startDate) {
+      query += ' AND or.returnedAt >= ?';
+      params.push(startDate);
+    }
+    if (endDate) {
+      query += ' AND or.returnedAt <= ?';
+      params.push(endDate);
+    }
+    
+    query += ' ORDER BY or.returnedAt DESC';
+    
+    const [rows] = await pool.execute(query, params);
+    res.json(rows);
+  } catch (error) {
+    console.error('Error fetching order returns:', error);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+api.post('/credit-notes', async (req, res) => {
+  try {
+    const { orderId, returnId, amount, reason, notes } = req.body;
+    
+    if (!orderId || !amount) {
+      return res.status(400).json({ error: 'orderId and amount are required' });
+    }
+    
+    const creditNoteNumber = `CN-${Date.now()}-${Math.random().toString(36).substr(2, 9).toUpperCase()}`;
+    
+    const [result] = await pool.execute(
+      `INSERT INTO credit_notes (creditNoteNumber, orderId, returnId, amount, reason, notes, status, createdAt)
+       VALUES (?, ?, ?, ?, ?, ?, 'active', NOW())`,
+      [creditNoteNumber, orderId, returnId || null, parseFloat(amount), reason || null, notes || null]
+    );
+    
+    const [newItem] = await pool.execute('SELECT * FROM credit_notes WHERE id = ?', [result.insertId]);
+    res.status(201).json(newItem[0]);
+  } catch (error) {
+    console.error('Error creating credit note:', error);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+api.get('/credit-notes', async (req, res) => {
+  try {
+    const { orderId, status, startDate, endDate } = req.query;
+    
+    let query = 'SELECT * FROM credit_notes WHERE 1=1';
+    const params = [];
+    
+    if (orderId) {
+      query += ' AND orderId = ?';
+      params.push(orderId);
+    }
+    if (status) {
+      query += ' AND status = ?';
+      params.push(status);
+    }
+    if (startDate) {
+      query += ' AND createdAt >= ?';
+      params.push(startDate);
+    }
+    if (endDate) {
+      query += ' AND createdAt <= ?';
+      params.push(endDate);
+    }
+    
+    query += ' ORDER BY createdAt DESC';
+    
+    const [rows] = await pool.execute(query, params);
+    res.json(rows);
+  } catch (error) {
+    console.error('Error fetching credit notes:', error);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+// Reconciliations
+api.get('/reconciliations', async (req, res) => {
+  try {
+    const { gatewayId, reconciliationStatus, startDate, endDate } = req.query;
+    
+    let query = `
+      SELECT 
+        r.*,
+        pg.name as gatewayName
+      FROM reconciliations r
+      LEFT JOIN payment_gateways pg ON r.gatewayId = pg.id
+      WHERE 1=1
+    `;
+    const params = [];
+    
+    if (gatewayId) {
+      query += ' AND r.gatewayId = ?';
+      params.push(gatewayId);
+    }
+    if (reconciliationStatus) {
+      query += ' AND r.reconciliationStatus = ?';
+      params.push(reconciliationStatus);
+    }
+    if (startDate) {
+      query += ' AND r.reconciliationDate >= ?';
+      params.push(startDate);
+    }
+    if (endDate) {
+      query += ' AND r.reconciliationDate <= ?';
+      params.push(endDate);
+    }
+    
+    query += ' ORDER BY r.reconciliationDate DESC';
+    
+    const [rows] = await pool.execute(query, params);
+    res.json(rows);
+  } catch (error) {
+    console.error('Error fetching reconciliations:', error);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+// Accounting Exports (Tally/Zoho)
+api.get('/accounting-exports', async (req, res) => {
+  try {
+    const { exportType, exportStatus, startDate, endDate } = req.query;
+    
+    let query = 'SELECT * FROM accounting_exports WHERE 1=1';
+    const params = [];
+    
+    if (exportType) {
+      query += ' AND exportType = ?';
+      params.push(exportType);
+    }
+    if (exportStatus) {
+      query += ' AND exportStatus = ?';
+      params.push(exportStatus);
+    }
+    if (startDate) {
+      query += ' AND createdAt >= ?';
+      params.push(startDate);
+    }
+    if (endDate) {
+      query += ' AND createdAt <= ?';
+      params.push(endDate);
+    }
+    
+    query += ' ORDER BY createdAt DESC';
+    
+    const [rows] = await pool.execute(query, params);
+    
+    const parsedRows = rows.map(row => {
+      const item = { ...row };
+      if (item.filters && typeof item.filters === 'string') {
+        try {
+          item.filters = JSON.parse(item.filters);
+        } catch (e) {}
+      }
+      return item;
+    });
+    
+    res.json(parsedRows);
+  } catch (error) {
+    console.error('Error fetching accounting exports:', error);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+api.get('/accounting-exports/:id/download', async (req, res) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    const { format = 'csv' } = req.query;
+    
+    const [rows] = await pool.execute('SELECT * FROM accounting_exports WHERE id = ?', [id]);
+    if (rows.length === 0) {
+      return res.status(404).json({ error: 'Export not found' });
+    }
+    
+    const exportData = rows[0];
+    
+    // Generate export file based on type and format
+    // This is a simplified version - in production, you'd generate actual Tally/Zoho format files
+    let content = '';
+    let filename = '';
+    let contentType = '';
+    
+    if (format === 'csv') {
+      contentType = 'text/csv';
+      filename = `${exportData.exportNumber}.csv`;
+      // Generate CSV content based on exportType
+      content = generateAccountingCSV(exportData);
+    } else if (format === 'xml') {
+      contentType = 'application/xml';
+      filename = `${exportData.exportNumber}.xml`;
+      content = generateAccountingXML(exportData);
+    }
+    
+    res.setHeader('Content-Type', contentType);
+    res.setHeader('Content-Disposition', `attachment; filename=${filename}`);
+    res.send(content);
+  } catch (error) {
+    console.error('Error downloading export:', error);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+function generateAccountingCSV(exportData) {
+  // Simplified CSV generation - in production, generate proper accounting format
+  const headers = ['Date', 'Account', 'Debit', 'Credit', 'Description'];
+  const rows = [headers.join(',')];
+  // Add actual data rows based on exportData
+  return rows.join('\n');
+}
+
+function generateAccountingXML(exportData) {
+  // Simplified XML generation for Tally/Zoho
+  return `<?xml version="1.0"?><export>${exportData.exportNumber}</export>`;
+}
+
+// GST Invoices & Compliance Reports
+api.get('/invoices/gst', async (req, res) => {
+  try {
+    const { startDate, endDate, gstin, invoiceStatus } = req.query;
+    
+    let query = `
+      SELECT 
+        i.*,
+        co.orderNumber,
+        co.userId,
+        r.gstin as retailerGstin,
+        r.name as retailerName
+      FROM invoices i
+      LEFT JOIN customer_orders co ON i.orderId = co.id
+      LEFT JOIN retailers r ON co.userId = r.id
+      WHERE 1=1
+    `;
+    const params = [];
+    
+    if (startDate) {
+      query += ' AND i.invoiceDate >= ?';
+      params.push(startDate);
+    }
+    if (endDate) {
+      query += ' AND i.invoiceDate <= ?';
+      params.push(endDate);
+    }
+    if (gstin) {
+      query += ' AND r.gstin = ?';
+      params.push(gstin);
+    }
+    if (invoiceStatus) {
+      query += ' AND i.invoiceStatus = ?';
+      params.push(invoiceStatus);
+    }
+    
+    query += ' ORDER BY i.invoiceDate DESC';
+    
+    const [rows] = await pool.execute(query, params);
+    
+    const parsedRows = rows.map(row => {
+      const item = { ...row };
+      if (item.taxBreakdown && typeof item.taxBreakdown === 'string') {
+        try {
+          item.taxBreakdown = JSON.parse(item.taxBreakdown);
+        } catch (e) {}
+      }
+      return item;
+    });
+    
+    res.json(parsedRows);
+  } catch (error) {
+    console.error('Error fetching GST invoices:', error);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+api.get('/invoices/:id/gst-pdf', async (req, res) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    
+    const [rows] = await pool.execute(`
+      SELECT 
+        i.*,
+        co.orderNumber,
+        co.userId,
+        r.gstin as retailerGstin,
+        r.name as retailerName,
+        r.address as retailerAddress
+      FROM invoices i
+      LEFT JOIN customer_orders co ON i.orderId = co.id
+      LEFT JOIN retailers r ON co.userId = r.id
+      WHERE i.id = ?
+    `, [id]);
+    
+    if (rows.length === 0) {
+      return res.status(404).json({ error: 'Invoice not found' });
+    }
+    
+    // In production, generate actual PDF using a library like pdfkit or puppeteer
+    // For now, return JSON data that can be used to generate PDF on frontend
+    const invoice = rows[0];
+    if (invoice.taxBreakdown && typeof invoice.taxBreakdown === 'string') {
+      try {
+        invoice.taxBreakdown = JSON.parse(invoice.taxBreakdown);
+      } catch (e) {}
+    }
+    
+    res.json(invoice);
+  } catch (error) {
+    console.error('Error fetching invoice for PDF:', error);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+api.get('/reports/gst-summary', async (req, res) => {
+  try {
+    const { startDate, endDate, gstin } = req.query;
+    
+    let query = `
+      SELECT 
+        DATE(i.invoiceDate) as date,
+        r.gstin,
+        r.name as retailerName,
+        SUM(i.amount) as totalAmount,
+        SUM(JSON_EXTRACT(i.taxBreakdown, '$.cgst')) as totalCGST,
+        SUM(JSON_EXTRACT(i.taxBreakdown, '$.sgst')) as totalSGST,
+        SUM(JSON_EXTRACT(i.taxBreakdown, '$.igst')) as totalIGST,
+        COUNT(*) as invoiceCount
+      FROM invoices i
+      LEFT JOIN customer_orders co ON i.orderId = co.id
+      LEFT JOIN retailers r ON co.userId = r.id
+      WHERE i.invoiceStatus = 'paid'
+    `;
+    const params = [];
+    
+    if (startDate) {
+      query += ' AND i.invoiceDate >= ?';
+      params.push(startDate);
+    }
+    if (endDate) {
+      query += ' AND i.invoiceDate <= ?';
+      params.push(endDate);
+    }
+    if (gstin) {
+      query += ' AND r.gstin = ?';
+      params.push(gstin);
+    }
+    
+    query += ' GROUP BY DATE(i.invoiceDate), r.gstin, r.name ORDER BY date DESC';
+    
+    const [rows] = await pool.execute(query, params);
+    res.json(rows);
+  } catch (error) {
+    console.error('Error fetching GST summary:', error);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
 // Categories
 api.get('/categories', listRoute('categories'));
 api.post('/categories', createRoute('categories'));
@@ -744,9 +1346,225 @@ api.delete('/orders/:id', deleteRoute('orders'));
 // Retailers
 api.get('/retailers', listRoute('retailers'));
 api.get('/retailers/:id', getRoute('retailers'));
-api.post('/retailers', createRoute('retailers'));
 api.put('/retailers/:id', updateRoute('retailers'));
 api.delete('/retailers/:id', deleteRoute('retailers'));
+
+// Retailer Registration (with password hashing and approval status)
+api.post('/retailers/register', async (req, res) => {
+  try {
+    const {
+      businessName,
+      businessType,
+      gstin,
+      drugLicense,
+      contactName,
+      phone,
+      email,
+      address,
+      city,
+      state,
+      pincode,
+      password
+    } = req.body;
+
+    // Validation
+    if (!businessName || !businessType || !gstin || !drugLicense || !contactName || !phone || !email || !address || !city || !state || !pincode || !password) {
+      return res.status(400).json({ error: 'All fields are required' });
+    }
+
+    if (gstin.length !== 15) {
+      return res.status(400).json({ error: 'GSTIN must be 15 characters' });
+    }
+
+    if (phone.length !== 10) {
+      return res.status(400).json({ error: 'Phone number must be 10 digits' });
+    }
+
+    if (password.length < 6) {
+      return res.status(400).json({ error: 'Password must be at least 6 characters' });
+    }
+
+    // Check if email or phone already exists
+    const [existing] = await pool.execute(
+      'SELECT id FROM retailers WHERE email = ? OR phone = ?',
+      [email, phone]
+    );
+
+    if (existing.length > 0) {
+      return res.status(400).json({ error: 'Email or phone number already registered' });
+    }
+
+    // Hash password
+    const saltRounds = 10;
+    const hashedPassword = await bcrypt.hash(password, saltRounds);
+
+    // Prepare address JSON
+    const addressData = {
+      street: address,
+      city,
+      state,
+      pincode
+    };
+
+    // Insert retailer with pending approval status
+    const [result] = await pool.execute(
+      `INSERT INTO retailers (name, email, phone, password, storeName, storeType, gstin, drugLicense, address, approvalStatus) 
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')`,
+      [
+        contactName,
+        email,
+        phone,
+        hashedPassword,
+        businessName,
+        businessType,
+        gstin,
+        drugLicense,
+        JSON.stringify(addressData)
+      ]
+    );
+
+    // Fetch the created retailer (without password)
+    const [newRetailer] = await pool.execute(
+      'SELECT id, name, email, phone, storeName, storeType, gstin, drugLicense, address, approvalStatus, createdAt FROM retailers WHERE id = ?',
+      [result.insertId]
+    );
+
+    const retailer = newRetailer[0];
+    if (retailer.address) {
+      retailer.address = JSON.parse(retailer.address);
+    }
+
+    // Log audit event
+    await logAuditEvent(req, 'CREATE', 'retailers', result.insertId.toString(), { created: retailer });
+
+    res.status(201).json({
+      success: true,
+      message: 'Registration successful. Your account is pending admin approval.',
+      retailer
+    });
+  } catch (error) {
+    console.error('Error registering retailer:', error);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+// Retailer Login
+api.post('/retailers/login', async (req, res) => {
+  try {
+    const { phone, password } = req.body;
+
+    if (!phone || !password) {
+      return res.status(400).json({ error: 'Phone and password are required' });
+    }
+
+    // Find retailer by phone
+    const [retailers] = await pool.execute(
+      'SELECT id, name, email, phone, password, storeName, storeType, gstin, drugLicense, address, approvalStatus FROM retailers WHERE phone = ?',
+      [phone]
+    );
+
+    if (retailers.length === 0) {
+      return res.status(401).json({ error: 'Invalid phone number or password' });
+    }
+
+    const retailer = retailers[0];
+
+    // Check if account is approved
+    if (retailer.approvalStatus !== 'approved') {
+      return res.status(403).json({
+        error: 'Account pending approval',
+        approvalStatus: retailer.approvalStatus,
+        message: retailer.approvalStatus === 'pending'
+          ? 'Your account is pending admin approval. Please wait for approval.'
+          : 'Your account has been rejected. Please contact support.'
+      });
+    }
+
+    // Verify password
+    const passwordMatch = await bcrypt.compare(password, retailer.password);
+    if (!passwordMatch) {
+      return res.status(401).json({ error: 'Invalid phone number or password' });
+    }
+
+    // Remove password from response
+    delete retailer.password;
+
+    // Parse address JSON
+    if (retailer.address) {
+      retailer.address = JSON.parse(retailer.address);
+    }
+
+    // Generate token (in production, use JWT)
+    const token = `retailer_token_${retailer.id}_${Date.now()}`;
+
+    // Log audit event
+    await logAuditEvent(req, 'LOGIN', 'retailers', retailer.id.toString(), { phone });
+
+    res.json({
+      success: true,
+      token,
+      retailer
+    });
+  } catch (error) {
+    console.error('Error logging in retailer:', error);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+// Admin: Approve/Reject Retailer
+api.put('/retailers/:id/approve', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { action, approvedBy, rejectionReason } = req.body;
+
+    if (!action || !['approve', 'reject'].includes(action)) {
+      return res.status(400).json({ error: 'Action must be "approve" or "reject"' });
+    }
+
+    const [retailers] = await pool.execute('SELECT * FROM retailers WHERE id = ?', [id]);
+    if (retailers.length === 0) {
+      return res.status(404).json({ error: 'Retailer not found' });
+    }
+
+    if (action === 'approve') {
+      await pool.execute(
+        'UPDATE retailers SET approvalStatus = ?, approvedBy = ?, approvedAt = NOW(), rejectionReason = NULL WHERE id = ?',
+        ['approved', approvedBy || 'admin', id]
+      );
+    } else {
+      if (!rejectionReason) {
+        return res.status(400).json({ error: 'Rejection reason is required' });
+      }
+      await pool.execute(
+        'UPDATE retailers SET approvalStatus = ?, approvedBy = ?, approvedAt = NULL, rejectionReason = ? WHERE id = ?',
+        ['rejected', approvedBy || 'admin', rejectionReason, id]
+      );
+    }
+
+    const [updated] = await pool.execute(
+      'SELECT id, name, email, phone, storeName, storeType, gstin, approvalStatus, approvedBy, approvedAt, rejectionReason FROM retailers WHERE id = ?',
+      [id]
+    );
+
+    const retailer = updated[0];
+
+    // Log audit event
+    await logAuditEvent(req, action.toUpperCase(), 'retailers', id.toString(), {
+      action,
+      approvedBy: approvedBy || 'admin',
+      rejectionReason: action === 'reject' ? rejectionReason : null
+    });
+
+    res.json({
+      success: true,
+      message: `Retailer ${action === 'approve' ? 'approved' : 'rejected'} successfully`,
+      retailer
+    });
+  } catch (error) {
+    console.error('Error updating retailer approval:', error);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
 
 // Distributors
 api.get('/distributors', listRoute('distributors'));
@@ -4534,6 +5352,1264 @@ api.post('/pricing/calculate', async (req, res) => {
   }
 });
 
+// ==================== SHIPMENTS & LOGISTICS ====================
+
+// Get all shipments
+api.get('/shipments', async (req, res) => {
+  try {
+    const { orderId, status, logisticsPartner } = req.query;
+    let query = 'SELECT * FROM shipments WHERE 1=1';
+    const params = [];
+    
+    if (orderId) {
+      query += ' AND orderId = ?';
+      params.push(orderId);
+    }
+    if (status) {
+      query += ' AND status = ?';
+      params.push(status);
+    }
+    if (logisticsPartner) {
+      query += ' AND logisticsPartner = ?';
+      params.push(logisticsPartner);
+    }
+    
+    query += ' ORDER BY createdAt DESC';
+    
+    const [rows] = await pool.execute(query, params);
+    
+    // Parse JSON fields
+    const parsedRows = rows.map(row => {
+      const item = { ...row };
+      const jsonFields = ['originAddress', 'destinationAddress', 'dimensions', 'labelData', 'partnerApiResponse'];
+      jsonFields.forEach(field => {
+        if (item[field] && typeof item[field] === 'string') {
+          try {
+            item[field] = JSON.parse(item[field]);
+          } catch (e) {}
+        }
+      });
+      return item;
+    });
+    
+    res.json(parsedRows);
+  } catch (error) {
+    // If table doesn't exist, return empty array instead of error
+    if (error.message && error.message.includes("doesn't exist")) {
+      console.log('Shipments table does not exist yet, returning empty array');
+      res.json([]);
+    } else {
+      console.error('Error fetching shipments:', error);
+      res.status(500).json({ error: 'Database error' });
+    }
+  }
+});
+
+// Get single shipment
+api.get('/shipments/:id', async (req, res) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    const [rows] = await pool.execute('SELECT * FROM shipments WHERE id = ?', [id]);
+    if (rows.length === 0) return res.status(404).json({ error: 'Shipment not found' });
+    
+    const item = rows[0];
+    const jsonFields = ['originAddress', 'destinationAddress', 'dimensions', 'labelData', 'partnerApiResponse'];
+    jsonFields.forEach(field => {
+      if (item[field] && typeof item[field] === 'string') {
+        try {
+          item[field] = JSON.parse(item[field]);
+        } catch (e) {}
+      }
+    });
+    
+    res.json(item);
+  } catch (error) {
+    console.error('Error fetching shipment:', error);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+// Create shipment
+api.post('/shipments', async (req, res) => {
+  try {
+    const {
+      orderId,
+      logisticsPartner,
+      originAddress,
+      destinationAddress,
+      weight,
+      dimensions,
+      notes
+    } = req.body;
+    
+    if (!orderId || !logisticsPartner || !originAddress || !destinationAddress) {
+      return res.status(400).json({ error: 'Missing required fields' });
+    }
+    
+    // Generate shipment number
+    const shipmentNumber = `SH${Date.now()}${Math.floor(Math.random() * 1000)}`;
+    
+    // Create shipment via logistics partner API
+    const partnerResponse = await createShipmentWithPartner(
+      logisticsPartner,
+      {
+        orderId,
+        shipmentNumber,
+        originAddress,
+        destinationAddress,
+        weight,
+        dimensions
+      }
+    );
+    
+    const [result] = await pool.execute(
+      `INSERT INTO shipments (
+        orderId, shipmentNumber, logisticsPartner, trackingNumber, status,
+        originAddress, destinationAddress, weight, dimensions, shippingCost,
+        estimatedDeliveryDate, notes, labelUrl, labelData, partnerApiResponse
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        orderId,
+        shipmentNumber,
+        logisticsPartner,
+        partnerResponse.trackingNumber || null,
+        partnerResponse.status || 'created',
+        JSON.stringify(originAddress),
+        JSON.stringify(destinationAddress),
+        weight || null,
+        dimensions ? JSON.stringify(dimensions) : null,
+        partnerResponse.shippingCost || null,
+        partnerResponse.estimatedDeliveryDate || null,
+        notes || null,
+        partnerResponse.labelUrl || null,
+        partnerResponse.labelData ? JSON.stringify(partnerResponse.labelData) : null,
+        JSON.stringify(partnerResponse)
+      ]
+    );
+    
+    // Create initial tracking entry
+    if (result.insertId) {
+      await pool.execute(
+        'INSERT INTO shipment_tracking (shipmentId, status, description, source) VALUES (?, ?, ?, ?)',
+        [result.insertId, partnerResponse.status || 'created', 'Shipment created', 'system']
+      );
+    }
+    
+    const [newShipment] = await pool.execute('SELECT * FROM shipments WHERE id = ?', [result.insertId]);
+    const shipment = newShipment[0];
+    const jsonFields = ['originAddress', 'destinationAddress', 'dimensions', 'labelData', 'partnerApiResponse'];
+    jsonFields.forEach(field => {
+      if (shipment[field] && typeof shipment[field] === 'string') {
+        try {
+          shipment[field] = JSON.parse(shipment[field]);
+        } catch (e) {}
+      }
+    });
+    
+    res.status(201).json(shipment);
+  } catch (error) {
+    console.error('Error creating shipment:', error);
+    res.status(500).json({ error: error.message || 'Database error' });
+  }
+});
+
+// Update shipment
+api.put('/shipments/:id', async (req, res) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    const {
+      status,
+      trackingNumber,
+      estimatedDeliveryDate,
+      actualDeliveryDate,
+      notes
+    } = req.body;
+    
+    const updates = [];
+    const params = [];
+    
+    if (status !== undefined) {
+      updates.push('status = ?');
+      params.push(status);
+    }
+    if (trackingNumber !== undefined) {
+      updates.push('trackingNumber = ?');
+      params.push(trackingNumber);
+    }
+    if (estimatedDeliveryDate !== undefined) {
+      updates.push('estimatedDeliveryDate = ?');
+      params.push(estimatedDeliveryDate);
+    }
+    if (actualDeliveryDate !== undefined) {
+      updates.push('actualDeliveryDate = ?');
+      params.push(actualDeliveryDate);
+    }
+    if (notes !== undefined) {
+      updates.push('notes = ?');
+      params.push(notes);
+    }
+    
+    if (updates.length === 0) {
+      return res.status(400).json({ error: 'No fields to update' });
+    }
+    
+    params.push(id);
+    await pool.execute(
+      `UPDATE shipments SET ${updates.join(', ')} WHERE id = ?`,
+      params
+    );
+    
+    // Add tracking entry if status changed
+    if (status) {
+      await pool.execute(
+        'INSERT INTO shipment_tracking (shipmentId, status, description, source) VALUES (?, ?, ?, ?)',
+        [id, status, `Status updated to ${status}`, 'manual']
+      );
+    }
+    
+    const [updated] = await pool.execute('SELECT * FROM shipments WHERE id = ?', [id]);
+    const shipment = updated[0];
+    const jsonFields = ['originAddress', 'destinationAddress', 'dimensions', 'labelData', 'partnerApiResponse'];
+    jsonFields.forEach(field => {
+      if (shipment[field] && typeof shipment[field] === 'string') {
+        try {
+          shipment[field] = JSON.parse(shipment[field]);
+        } catch (e) {}
+      }
+    });
+    
+    res.json(shipment);
+  } catch (error) {
+    console.error('Error updating shipment:', error);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+// Generate shipping label
+api.post('/shipments/:id/generate-label', async (req, res) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    const [rows] = await pool.execute('SELECT * FROM shipments WHERE id = ?', [id]);
+    if (rows.length === 0) return res.status(404).json({ error: 'Shipment not found' });
+    
+    const shipment = rows[0];
+    
+    // Generate label via partner API
+    const labelResponse = await generateLabelWithPartner(
+      shipment.logisticsPartner,
+      shipment.trackingNumber || shipment.shipmentNumber
+    );
+    
+    // Update shipment with label data
+    await pool.execute(
+      'UPDATE shipments SET labelUrl = ?, labelData = ? WHERE id = ?',
+      [
+        labelResponse.labelUrl || null,
+        labelResponse.labelData ? JSON.stringify(labelResponse.labelData) : null,
+        id
+      ]
+    );
+    
+    res.json({
+      labelUrl: labelResponse.labelUrl,
+      labelData: labelResponse.labelData,
+      message: 'Label generated successfully'
+    });
+  } catch (error) {
+    console.error('Error generating label:', error);
+    res.status(500).json({ error: error.message || 'Failed to generate label' });
+  }
+});
+
+// Get shipment tracking history
+api.get('/shipments/:id/tracking', async (req, res) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    const [rows] = await pool.execute(
+      'SELECT * FROM shipment_tracking WHERE shipmentId = ? ORDER BY timestamp DESC',
+      [id]
+    );
+    
+    const parsedRows = rows.map(row => {
+      const item = { ...row };
+      if (item.metadata && typeof item.metadata === 'string') {
+        try {
+          item.metadata = JSON.parse(item.metadata);
+        } catch (e) {}
+      }
+      return item;
+    });
+    
+    res.json(parsedRows);
+  } catch (error) {
+    console.error('Error fetching tracking:', error);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+// Update shipment tracking (manual or from webhook)
+api.post('/shipments/:id/tracking', async (req, res) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    const { status, location, description, source = 'manual', metadata } = req.body;
+    
+    if (!status) {
+      return res.status(400).json({ error: 'Status is required' });
+    }
+    
+    await pool.execute(
+      'INSERT INTO shipment_tracking (shipmentId, status, location, description, source, metadata) VALUES (?, ?, ?, ?, ?, ?)',
+      [id, status, location || null, description || null, source, metadata ? JSON.stringify(metadata) : null]
+    );
+    
+    // Update shipment status if provided
+    if (status) {
+      await pool.execute('UPDATE shipments SET status = ? WHERE id = ?', [status, id]);
+    }
+    
+    res.json({ message: 'Tracking updated successfully' });
+  } catch (error) {
+    console.error('Error updating tracking:', error);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+// Sync tracking from partner API
+api.post('/shipments/:id/sync-tracking', async (req, res) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    const [rows] = await pool.execute('SELECT * FROM shipments WHERE id = ?', [id]);
+    if (rows.length === 0) return res.status(404).json({ error: 'Shipment not found' });
+    
+    const shipment = rows[0];
+    
+    // Fetch tracking from partner API
+    const trackingData = await fetchTrackingFromPartner(
+      shipment.logisticsPartner,
+      shipment.trackingNumber || shipment.shipmentNumber
+    );
+    
+    // Add tracking entries
+    for (const tracking of trackingData.events || []) {
+      await pool.execute(
+        'INSERT INTO shipment_tracking (shipmentId, status, location, description, source, metadata, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?)',
+        [
+          id,
+          tracking.status,
+          tracking.location || null,
+          tracking.description || null,
+          'partner_api',
+          tracking.metadata ? JSON.stringify(tracking.metadata) : null,
+          tracking.timestamp || new Date()
+        ]
+      );
+    }
+    
+    // Update shipment status if available
+    if (trackingData.currentStatus) {
+      await pool.execute('UPDATE shipments SET status = ? WHERE id = ?', [trackingData.currentStatus, id]);
+    }
+    
+    res.json({ message: 'Tracking synced successfully', events: trackingData.events?.length || 0 });
+  } catch (error) {
+    console.error('Error syncing tracking:', error);
+    res.status(500).json({ error: error.message || 'Failed to sync tracking' });
+  }
+});
+
+// Get logistics partners
+api.get('/logistics-partners', async (req, res) => {
+  try {
+    const [rows] = await pool.execute('SELECT * FROM logistics_partners ORDER BY name');
+    const parsedRows = rows.map(row => {
+      const item = { ...row };
+      if (item.config && typeof item.config === 'string') {
+        try {
+          item.config = JSON.parse(item.config);
+        } catch (e) {}
+      }
+      item.isActive = Boolean(item.isActive);
+      return item;
+    });
+    res.json(parsedRows);
+  } catch (error) {
+    // If table doesn't exist, return empty array instead of error
+    if (error.message && error.message.includes("doesn't exist")) {
+      console.log('Logistics partners table does not exist yet, returning empty array');
+      res.json([]);
+    } else {
+      console.error('Error fetching logistics partners:', error);
+      res.status(500).json({ error: 'Database error' });
+    }
+  }
+});
+
+// Update logistics partner
+api.put('/logistics-partners/:id', async (req, res) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    const { isActive, apiKey, apiSecret, config } = req.body;
+    
+    const updates = [];
+    const params = [];
+    
+    if (isActive !== undefined) {
+      updates.push('isActive = ?');
+      params.push(isActive);
+    }
+    if (apiKey !== undefined) {
+      updates.push('apiKey = ?');
+      params.push(apiKey);
+    }
+    if (apiSecret !== undefined) {
+      updates.push('apiSecret = ?');
+      params.push(apiSecret);
+    }
+    if (config !== undefined) {
+      updates.push('config = ?');
+      params.push(JSON.stringify(config));
+    }
+    
+    if (updates.length === 0) {
+      return res.status(400).json({ error: 'No fields to update' });
+    }
+    
+    params.push(id);
+    await pool.execute(
+      `UPDATE logistics_partners SET ${updates.join(', ')} WHERE id = ?`,
+      params
+    );
+    
+    const [updated] = await pool.execute('SELECT * FROM logistics_partners WHERE id = ?', [id]);
+    const partner = updated[0];
+    if (partner.config && typeof partner.config === 'string') {
+      try {
+        partner.config = JSON.parse(partner.config);
+      } catch (e) {}
+    }
+    partner.isActive = Boolean(partner.isActive);
+    
+    res.json(partner);
+  } catch (error) {
+    console.error('Error updating logistics partner:', error);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+// Helper function to create shipment with partner API
+async function createShipmentWithPartner(partnerName, shipmentData) {
+  // Get partner config
+  const [partners] = await pool.execute('SELECT * FROM logistics_partners WHERE name = ?', [partnerName]);
+  if (partners.length === 0) {
+    throw new Error(`Logistics partner ${partnerName} not found`);
+  }
+  
+  const partner = partners[0];
+  if (!partner.isActive) {
+    throw new Error(`Logistics partner ${partnerName} is not active`);
+  }
+  
+  // For Shadow (local partner), simulate API call
+  if (partnerName === 'shadow') {
+    return {
+      trackingNumber: `SHADOW${Date.now()}${Math.floor(Math.random() * 10000)}`,
+      status: 'created',
+      shippingCost: calculateShippingCost(shipmentData),
+      estimatedDeliveryDate: new Date(Date.now() + 3 * 24 * 60 * 60 * 1000).toISOString().split('T')[0], // 3 days
+      labelUrl: null,
+      labelData: {
+        shipmentNumber: shipmentData.shipmentNumber,
+        barcode: `SHADOW${Date.now()}`
+      }
+    };
+  }
+  
+  // For DHL and Delhivery, you would make actual API calls here
+  // This is a placeholder for future integration
+  if (partnerName === 'dhl' || partnerName === 'delhivery') {
+    // In production, make actual API call to partner
+    // const response = await axios.post(partner.apiEndpoint, {...}, {headers: {Authorization: `Bearer ${partner.apiKey}`}});
+    throw new Error(`${partner.displayName} integration not yet implemented. Please use Shadow Logistics.`);
+  }
+  
+  throw new Error(`Unknown logistics partner: ${partnerName}`);
+}
+
+// Helper function to generate label with partner API
+async function generateLabelWithPartner(partnerName, trackingNumber) {
+  const [partners] = await pool.execute('SELECT * FROM logistics_partners WHERE name = ?', [partnerName]);
+  if (partners.length === 0) {
+    throw new Error(`Logistics partner ${partnerName} not found`);
+  }
+  
+  const partner = partners[0];
+  
+  if (partnerName === 'shadow') {
+    // Generate label URL (in production, this would be a real PDF generation)
+    const labelUrl = `/api/shipments/labels/${trackingNumber}.pdf`;
+    return {
+      labelUrl,
+      labelData: {
+        trackingNumber,
+        barcode: trackingNumber,
+        qrCode: trackingNumber,
+        generatedAt: new Date().toISOString()
+      }
+    };
+  }
+  
+  // For other partners, make actual API calls
+  throw new Error(`${partner.displayName} label generation not yet implemented`);
+}
+
+// Helper function to fetch tracking from partner API
+async function fetchTrackingFromPartner(partnerName, trackingNumber) {
+  const [partners] = await pool.execute('SELECT * FROM logistics_partners WHERE name = ?', [partnerName]);
+  if (partners.length === 0) {
+    throw new Error(`Logistics partner ${partnerName} not found`);
+  }
+  
+  const partner = partners[0];
+  
+  if (partnerName === 'shadow') {
+    // Simulate tracking events
+    const statuses = ['created', 'in_transit', 'out_for_delivery', 'delivered'];
+    const currentStatus = statuses[Math.floor(Math.random() * statuses.length)];
+    
+    return {
+      currentStatus,
+      events: [
+        {
+          status: 'created',
+          location: 'Origin Warehouse',
+          description: 'Shipment created and ready for pickup',
+          timestamp: new Date(Date.now() - 2 * 24 * 60 * 60 * 1000)
+        },
+        {
+          status: 'in_transit',
+          location: 'Transit Hub',
+          description: 'Shipment in transit',
+          timestamp: new Date(Date.now() - 1 * 24 * 60 * 60 * 1000)
+        },
+        ...(currentStatus === 'out_for_delivery' || currentStatus === 'delivered' ? [{
+          status: 'out_for_delivery',
+          location: 'Local Distribution Center',
+          description: 'Out for delivery',
+          timestamp: new Date(Date.now() - 6 * 60 * 60 * 1000)
+        }] : []),
+        ...(currentStatus === 'delivered' ? [{
+          status: 'delivered',
+          location: 'Destination',
+          description: 'Delivered successfully',
+          timestamp: new Date()
+        }] : [])
+      ]
+    };
+  }
+  
+  // For other partners, make actual API calls
+  throw new Error(`${partner.displayName} tracking not yet implemented`);
+}
+
+// Helper function to calculate shipping cost
+function calculateShippingCost(shipmentData) {
+  // Simple calculation based on weight and distance
+  const baseCost = 50;
+  const weightCost = (shipmentData.weight || 1) * 10;
+  return baseCost + weightCost;
+}
+
+// ==================== ANALYTICS & BI ====================
+
+// Event Ingestion - Track analytics events
+api.post('/analytics/events', async (req, res) => {
+  try {
+    const { eventType, entityType, entityId, userId, properties } = req.body;
+    
+    if (!eventType) {
+      return res.status(400).json({ error: 'eventType is required' });
+    }
+    
+    await pool.execute(
+      'INSERT INTO analytics_events (eventType, entityType, entityId, userId, properties) VALUES (?, ?, ?, ?, ?)',
+      [
+        eventType,
+        entityType || null,
+        entityId || null,
+        userId || null,
+        properties ? JSON.stringify(properties) : null
+      ]
+    );
+    
+    res.status(201).json({ message: 'Event recorded successfully' });
+  } catch (error) {
+    console.error('Error recording analytics event:', error);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+// Batch Event Ingestion
+api.post('/analytics/events/batch', async (req, res) => {
+  try {
+    const { events } = req.body;
+    
+    if (!Array.isArray(events) || events.length === 0) {
+      return res.status(400).json({ error: 'events array is required' });
+    }
+    
+    const values = events.map(event => [
+      event.eventType,
+      event.entityType || null,
+      event.entityId || null,
+      event.userId || null,
+      event.properties ? JSON.stringify(event.properties) : null
+    ]);
+    
+    await pool.execute(
+      'INSERT INTO analytics_events (eventType, entityType, entityId, userId, properties) VALUES ?',
+      [values]
+    );
+    
+    res.status(201).json({ message: `${events.length} events recorded successfully` });
+  } catch (error) {
+    console.error('Error recording batch analytics events:', error);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+// Get Analytics Dashboard Data
+api.get('/analytics/dashboard/:type', async (req, res) => {
+  try {
+    const { type } = req.params;
+    const { startDate, endDate, period } = req.query;
+    
+    let data = {};
+    
+    switch (type) {
+      case 'sales':
+        data = await getSalesDashboardData(startDate, endDate, period);
+        break;
+      case 'inventory':
+        data = await getInventoryDashboardData(startDate, endDate, period);
+        break;
+      case 'orders':
+        data = await getOrdersDashboardData(startDate, endDate, period);
+        break;
+      case 'receivables':
+        data = await getReceivablesDashboardData(startDate, endDate, period);
+        break;
+      case 'overview':
+        data = await getOverviewDashboardData(startDate, endDate, period);
+        break;
+      default:
+        return res.status(400).json({ error: 'Invalid dashboard type' });
+    }
+    
+    res.json(data);
+  } catch (error) {
+    console.error('Error fetching dashboard data:', error);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+// Get Sales Dashboard Data
+async function getSalesDashboardData(startDate, endDate, period = 'daily') {
+  try {
+    const dateFilter = startDate && endDate 
+      ? `AND DATE(createdAt) BETWEEN '${startDate}' AND '${endDate}'`
+      : startDate 
+        ? `AND DATE(createdAt) >= '${startDate}'`
+        : endDate
+          ? `AND DATE(createdAt) <= '${endDate}'`
+          : `AND DATE(createdAt) >= DATE_SUB(CURDATE(), INTERVAL 30 DAY)`;
+    
+    // Total Sales
+    const [totalSales] = await pool.execute(
+      `SELECT COALESCE(SUM(finalAmount), 0) as total, COUNT(*) as count 
+       FROM orders 
+       WHERE status IN ('completed', 'processing') ${dateFilter}`
+    );
+    
+    // Sales Trend
+    let groupBy = 'DATE(createdAt)';
+    if (period === 'weekly') groupBy = 'YEARWEEK(createdAt)';
+    if (period === 'monthly') groupBy = 'DATE_FORMAT(createdAt, "%Y-%m")';
+    
+    const [salesTrend] = await pool.execute(
+      `SELECT ${groupBy} as period, COALESCE(SUM(finalAmount), 0) as amount, COUNT(*) as count
+       FROM orders 
+       WHERE status IN ('completed', 'processing') ${dateFilter}
+       GROUP BY ${groupBy}
+       ORDER BY period ASC`
+    );
+    
+    // Top Products
+    const [topProducts] = await pool.execute(
+      `SELECT p.id, p.name, SUM(oi.quantity) as totalQuantity, SUM(oi.price * oi.quantity) as totalRevenue
+       FROM orders o
+       JOIN JSON_TABLE(o.items, '$[*]' COLUMNS (
+         productId INT PATH '$.productId',
+         quantity INT PATH '$.quantity',
+         price DECIMAL(10,2) PATH '$.price'
+       )) oi ON TRUE
+       JOIN products p ON p.id = oi.productId
+       WHERE o.status IN ('completed', 'processing') ${dateFilter}
+       GROUP BY p.id, p.name
+       ORDER BY totalRevenue DESC
+       LIMIT 10`
+    );
+    
+    // Sales by Category
+    const [salesByCategory] = await pool.execute(
+      `SELECT p.category, SUM(oi.price * oi.quantity) as totalRevenue, COUNT(DISTINCT o.id) as orderCount
+       FROM orders o
+       JOIN JSON_TABLE(o.items, '$[*]' COLUMNS (
+         productId INT PATH '$.productId',
+         quantity INT PATH '$.quantity',
+         price DECIMAL(10,2) PATH '$.price'
+       )) oi ON TRUE
+       JOIN products p ON p.id = oi.productId
+       WHERE o.status IN ('completed', 'processing') ${dateFilter}
+       GROUP BY p.category
+       ORDER BY totalRevenue DESC`
+    );
+    
+    // Average Order Value
+    const [avgOrderValue] = await pool.execute(
+      `SELECT COALESCE(AVG(finalAmount), 0) as avgValue
+       FROM orders 
+       WHERE status IN ('completed', 'processing') ${dateFilter}`
+    );
+    
+    return {
+      totalSales: totalSales[0]?.total || 0,
+      orderCount: totalSales[0]?.count || 0,
+      salesTrend: salesTrend,
+      topProducts: topProducts,
+      salesByCategory: salesByCategory,
+      averageOrderValue: avgOrderValue[0]?.avgValue || 0
+    };
+  } catch (error) {
+    console.error('Error getting sales dashboard data:', error);
+    // Return empty data structure on error
+    return {
+      totalSales: 0,
+      orderCount: 0,
+      salesTrend: [],
+      topProducts: [],
+      salesByCategory: [],
+      averageOrderValue: 0
+    };
+  }
+}
+
+// Get Inventory Dashboard Data
+async function getInventoryDashboardData(startDate, endDate, period = 'daily') {
+  try {
+    // Inventory Turnover
+    const [turnover] = await pool.execute(
+      `SELECT 
+        p.id, p.name, p.category,
+        COALESCE(SUM(oi.quantity), 0) as unitsSold,
+        p.stockQuantity as currentStock,
+        CASE 
+          WHEN p.stockQuantity > 0 THEN COALESCE(SUM(oi.quantity), 0) / p.stockQuantity
+          ELSE 0
+        END as turnoverRatio
+       FROM products p
+       LEFT JOIN orders o ON o.status IN ('completed', 'processing')
+       LEFT JOIN JSON_TABLE(o.items, '$[*]' COLUMNS (
+         productId INT PATH '$.productId',
+         quantity INT PATH '$.quantity'
+       )) oi ON oi.productId = p.id
+       WHERE p.stockQuantity > 0
+       GROUP BY p.id, p.name, p.category, p.stockQuantity
+       ORDER BY turnoverRatio DESC
+       LIMIT 20`
+    );
+    
+    // Stock Levels
+    const [stockLevels] = await pool.execute(
+      `SELECT 
+        category,
+        COUNT(*) as totalProducts,
+        SUM(CASE WHEN stockQuantity = 0 THEN 1 ELSE 0 END) as outOfStock,
+        SUM(CASE WHEN stockQuantity > 0 AND stockQuantity < 10 THEN 1 ELSE 0 END) as lowStock,
+        SUM(stockQuantity) as totalStock,
+        SUM(stockQuantity * price) as totalValue
+       FROM products
+       GROUP BY category`
+    );
+    
+    // Low Stock Alerts
+    const [lowStock] = await pool.execute(
+      `SELECT id, name, category, stockQuantity, price
+       FROM products
+       WHERE stockQuantity > 0 AND stockQuantity < 10
+       ORDER BY stockQuantity ASC
+       LIMIT 20`
+    );
+    
+    // Inventory Value
+    const [inventoryValue] = await pool.execute(
+      `SELECT 
+        SUM(stockQuantity * price) as totalValue,
+        COUNT(*) as totalProducts,
+        SUM(CASE WHEN stockQuantity = 0 THEN 1 ELSE 0 END) as outOfStockCount
+       FROM products`
+    );
+    
+    return {
+      inventoryTurnover: turnover,
+      stockLevels: stockLevels,
+      lowStockAlerts: lowStock,
+      inventoryValue: inventoryValue[0] || { totalValue: 0, totalProducts: 0, outOfStockCount: 0 }
+    };
+  } catch (error) {
+    console.error('Error getting inventory dashboard data:', error);
+    return {
+      inventoryTurnover: [],
+      stockLevels: [],
+      lowStockAlerts: [],
+      inventoryValue: { totalValue: 0, totalProducts: 0, outOfStockCount: 0 }
+    };
+  }
+}
+
+// Get Orders Dashboard Data
+async function getOrdersDashboardData(startDate, endDate, period = 'daily') {
+  try {
+    const dateFilter = startDate && endDate 
+      ? `AND DATE(createdAt) BETWEEN '${startDate}' AND '${endDate}'`
+      : startDate 
+        ? `AND DATE(createdAt) >= '${startDate}'`
+        : endDate
+          ? `AND DATE(createdAt) <= '${endDate}'`
+          : '';
+    
+    // Pending Orders
+    const [pendingOrders] = await pool.execute(
+      `SELECT 
+        COUNT(*) as count,
+        COALESCE(SUM(finalAmount), 0) as totalValue,
+        AVG(finalAmount) as avgValue
+       FROM orders
+       WHERE status IN ('pending', 'processing') ${dateFilter}`
+    );
+    
+    // Order Status Breakdown
+    const [orderStatus] = await pool.execute(
+      `SELECT 
+        status,
+        COUNT(*) as count,
+        COALESCE(SUM(finalAmount), 0) as totalValue
+       FROM orders
+       WHERE 1=1 ${dateFilter}
+       GROUP BY status`
+    );
+    
+    // Order Trend
+    let groupBy = 'DATE(createdAt)';
+    if (period === 'weekly') groupBy = 'YEARWEEK(createdAt)';
+    if (period === 'monthly') groupBy = 'DATE_FORMAT(createdAt, "%Y-%m")';
+    
+    const [orderTrend] = await pool.execute(
+      `SELECT 
+        ${groupBy} as period,
+        COUNT(*) as count,
+        COALESCE(SUM(finalAmount), 0) as totalValue
+       FROM orders
+       WHERE 1=1 ${dateFilter}
+       GROUP BY ${groupBy}
+       ORDER BY period ASC`
+    );
+    
+    // Average Order Value Trend
+    const [avgOrderTrend] = await pool.execute(
+      `SELECT 
+        ${groupBy} as period,
+        AVG(finalAmount) as avgValue,
+        COUNT(*) as count
+       FROM orders
+       WHERE status IN ('completed', 'processing') ${dateFilter}
+       GROUP BY ${groupBy}
+       ORDER BY period ASC`
+    );
+    
+    return {
+      pendingOrders: pendingOrders[0] || { count: 0, totalValue: 0, avgValue: 0 },
+      orderStatus: orderStatus,
+      orderTrend: orderTrend,
+      averageOrderValueTrend: avgOrderTrend
+    };
+  } catch (error) {
+    console.error('Error getting orders dashboard data:', error);
+    return {
+      pendingOrders: { count: 0, totalValue: 0, avgValue: 0 },
+      orderStatus: [],
+      orderTrend: [],
+      averageOrderValueTrend: []
+    };
+  }
+}
+
+// Get Receivables Dashboard Data
+async function getReceivablesDashboardData(startDate, endDate, period = 'daily') {
+  try {
+    const dateFilter = startDate && endDate 
+      ? `AND DATE(createdAt) BETWEEN '${startDate}' AND '${endDate}'`
+      : startDate 
+        ? `AND DATE(createdAt) >= '${startDate}'`
+        : endDate
+          ? `AND DATE(createdAt) <= '${endDate}'`
+          : '';
+    
+    // Aging Receivables
+    const [agingReceivables] = await pool.execute(
+      `SELECT 
+        CASE
+          WHEN DATEDIFF(CURDATE(), dueDate) <= 0 THEN 'Current'
+          WHEN DATEDIFF(CURDATE(), dueDate) <= 30 THEN '1-30 Days'
+          WHEN DATEDIFF(CURDATE(), dueDate) <= 60 THEN '31-60 Days'
+          WHEN DATEDIFF(CURDATE(), dueDate) <= 90 THEN '61-90 Days'
+          ELSE 'Over 90 Days'
+        END as ageBucket,
+        COUNT(*) as count,
+        COALESCE(SUM(pendingAmount), 0) as totalAmount
+       FROM outstanding
+       WHERE status IN ('pending', 'partial')
+       GROUP BY ageBucket
+       ORDER BY 
+         CASE ageBucket
+           WHEN 'Current' THEN 1
+           WHEN '1-30 Days' THEN 2
+           WHEN '31-60 Days' THEN 3
+           WHEN '61-90 Days' THEN 4
+           ELSE 5
+         END`
+    );
+    
+    // Payment Status
+    const [paymentStatus] = await pool.execute(
+      `SELECT 
+        status,
+        COUNT(*) as count,
+        COALESCE(SUM(pendingAmount), 0) as totalAmount
+       FROM outstanding
+       WHERE 1=1 ${dateFilter}
+       GROUP BY status`
+    );
+    
+    // Collection Trend
+    let groupBy = 'DATE(paymentDate)';
+    if (period === 'weekly') groupBy = 'YEARWEEK(paymentDate)';
+    if (period === 'monthly') groupBy = 'DATE_FORMAT(paymentDate, "%Y-%m")';
+    
+    const [collectionTrend] = await pool.execute(
+      `SELECT 
+        ${groupBy} as period,
+        COUNT(*) as count,
+        COALESCE(SUM(amount), 0) as totalCollected
+       FROM outstanding_history
+       WHERE status = 'completed' ${dateFilter}
+       GROUP BY ${groupBy}
+       ORDER BY period ASC`
+    );
+    
+    // Outstanding Summary
+    const [outstandingSummary] = await pool.execute(
+      `SELECT 
+        COALESCE(SUM(pendingAmount), 0) as totalOutstanding,
+        COUNT(*) as totalInvoices,
+        COALESCE(SUM(CASE WHEN status = 'pending' THEN pendingAmount ELSE 0 END), 0) as pendingAmount,
+        COALESCE(SUM(CASE WHEN status = 'partial' THEN pendingAmount ELSE 0 END), 0) as partialAmount,
+        COALESCE(SUM(CASE WHEN status = 'overdue' THEN pendingAmount ELSE 0 END), 0) as overdueAmount
+       FROM outstanding
+       WHERE status IN ('pending', 'partial', 'overdue')`
+    );
+    
+    return {
+      agingReceivables: agingReceivables,
+      paymentStatus: paymentStatus,
+      collectionTrend: collectionTrend,
+      outstandingSummary: outstandingSummary[0] || {
+        totalOutstanding: 0,
+        totalInvoices: 0,
+        pendingAmount: 0,
+        partialAmount: 0,
+        overdueAmount: 0
+      }
+    };
+  } catch (error) {
+    console.error('Error getting receivables dashboard data:', error);
+    return {
+      agingReceivables: [],
+      paymentStatus: [],
+      collectionTrend: [],
+      outstandingSummary: {
+        totalOutstanding: 0,
+        totalInvoices: 0,
+        pendingAmount: 0,
+        partialAmount: 0,
+        overdueAmount: 0
+      }
+    };
+  }
+}
+
+// Get Overview Dashboard Data
+async function getOverviewDashboardData(startDate, endDate, period = 'daily') {
+  try {
+    const salesData = await getSalesDashboardData(startDate, endDate, period);
+    const ordersData = await getOrdersDashboardData(startDate, endDate, period);
+    const receivablesData = await getReceivablesDashboardData(startDate, endDate, period);
+    const inventoryData = await getInventoryDashboardData(startDate, endDate, period);
+    
+    return {
+      sales: {
+        total: salesData.totalSales,
+        orderCount: salesData.orderCount,
+        averageOrderValue: salesData.averageOrderValue
+      },
+      orders: {
+        pending: ordersData.pendingOrders.count,
+        pendingValue: ordersData.pendingOrders.totalValue
+      },
+      receivables: {
+        totalOutstanding: receivablesData.outstandingSummary.totalOutstanding,
+        overdue: receivablesData.outstandingSummary.overdueAmount
+      },
+      inventory: {
+        totalValue: inventoryData.inventoryValue.totalValue,
+        lowStockCount: inventoryData.lowStockAlerts.length,
+        outOfStockCount: inventoryData.inventoryValue.outOfStockCount
+      }
+    };
+  } catch (error) {
+    console.error('Error getting overview dashboard data:', error);
+    return {
+      sales: { total: 0, orderCount: 0, averageOrderValue: 0 },
+      orders: { pending: 0, pendingValue: 0 },
+      receivables: { totalOutstanding: 0, overdue: 0 },
+      inventory: { totalValue: 0, lowStockCount: 0, outOfStockCount: 0 }
+    };
+  }
+}
+
+// Get Analytics Events
+api.get('/analytics/events', async (req, res) => {
+  try {
+    const { eventType, entityType, startDate, endDate, limit = 100 } = req.query;
+    
+    let query = 'SELECT * FROM analytics_events WHERE 1=1';
+    const params = [];
+    
+    if (eventType) {
+      query += ' AND eventType = ?';
+      params.push(eventType);
+    }
+    if (entityType) {
+      query += ' AND entityType = ?';
+      params.push(entityType);
+    }
+    if (startDate) {
+      query += ' AND DATE(timestamp) >= ?';
+      params.push(startDate);
+    }
+    if (endDate) {
+      query += ' AND DATE(timestamp) <= ?';
+      params.push(endDate);
+    }
+    
+    query += ' ORDER BY timestamp DESC LIMIT ?';
+    params.push(parseInt(limit, 10));
+    
+    const [rows] = await pool.execute(query, params);
+    
+    const parsedRows = rows.map(row => {
+      const item = { ...row };
+      if (item.properties && typeof item.properties === 'string') {
+        try {
+          item.properties = JSON.parse(item.properties);
+        } catch (e) {}
+      }
+      return item;
+    });
+    
+    res.json(parsedRows);
+  } catch (error) {
+    console.error('Error fetching analytics events:', error);
+    if (error.message && error.message.includes("doesn't exist")) {
+      res.json([]);
+    } else {
+      res.status(500).json({ error: 'Database error' });
+    }
+  }
+});
+
+// Audit Events API
+api.get('/audit-events', async (req, res) => {
+  try {
+    const { user, action, resource, resource_id, startDate, endDate, limit = 100, offset = 0 } = req.query;
+    
+    let query = 'SELECT * FROM audit_events WHERE 1=1';
+    const params = [];
+    
+    if (user) {
+      query += ' AND user = ?';
+      params.push(user);
+    }
+    if (action) {
+      query += ' AND action = ?';
+      params.push(action);
+    }
+    if (resource) {
+      query += ' AND resource = ?';
+      params.push(resource);
+    }
+    if (resource_id) {
+      query += ' AND resource_id = ?';
+      params.push(resource_id);
+    }
+    if (startDate) {
+      query += ' AND timestamp >= ?';
+      params.push(startDate);
+    }
+    if (endDate) {
+      query += ' AND timestamp <= ?';
+      params.push(endDate);
+    }
+    
+    query += ' ORDER BY timestamp DESC LIMIT ? OFFSET ?';
+    params.push(parseInt(limit), parseInt(offset));
+    
+    const [rows] = await pool.execute(query, params);
+    
+    // Parse JSON fields
+    const parsedRows = rows.map(row => {
+      const item = { ...row };
+      if (item.details && typeof item.details === 'string') {
+        try {
+          item.details = JSON.parse(item.details);
+        } catch (e) {
+          item.details = null;
+        }
+      }
+      return item;
+    });
+    
+    // Get total count for pagination
+    let countQuery = 'SELECT COUNT(*) as total FROM audit_events WHERE 1=1';
+    const countParams = [];
+    
+    if (user) {
+      countQuery += ' AND user = ?';
+      countParams.push(user);
+    }
+    if (action) {
+      countQuery += ' AND action = ?';
+      countParams.push(action);
+    }
+    if (resource) {
+      countQuery += ' AND resource = ?';
+      countParams.push(resource);
+    }
+    if (resource_id) {
+      countQuery += ' AND resource_id = ?';
+      countParams.push(resource_id);
+    }
+    if (startDate) {
+      countQuery += ' AND timestamp >= ?';
+      countParams.push(startDate);
+    }
+    if (endDate) {
+      countQuery += ' AND timestamp <= ?';
+      countParams.push(endDate);
+    }
+    
+    const [countRows] = await pool.execute(countQuery, countParams);
+    const total = countRows[0].total;
+    
+    res.json({
+      events: parsedRows,
+      total,
+      limit: parseInt(limit),
+      offset: parseInt(offset)
+    });
+  } catch (error) {
+    console.error('Error fetching audit events:', error);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+api.get('/audit-events/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const [rows] = await pool.execute('SELECT * FROM audit_events WHERE id = ?', [id]);
+    
+    if (rows.length === 0) {
+      return res.status(404).json({ error: 'Audit event not found' });
+    }
+    
+    const event = { ...rows[0] };
+    if (event.details && typeof event.details === 'string') {
+      try {
+        event.details = JSON.parse(event.details);
+      } catch (e) {
+        event.details = null;
+      }
+    }
+    
+    res.json(event);
+  } catch (error) {
+    console.error('Error fetching audit event:', error);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+api.post('/audit-events', async (req, res) => {
+  try {
+    const { user, action, resource, resource_id, details, ip_address, user_agent } = req.body;
+    
+    if (!user || !action || !resource) {
+      return res.status(400).json({ error: 'user, action, and resource are required' });
+    }
+    
+    const detailsJson = details ? JSON.stringify(details) : null;
+    
+    const [result] = await pool.execute(
+      'INSERT INTO audit_events (user, action, resource, resource_id, details, ip_address, user_agent) VALUES (?, ?, ?, ?, ?, ?, ?)',
+      [user, action, resource, resource_id || null, detailsJson, ip_address || null, user_agent || null]
+    );
+    
+    res.status(201).json({
+      id: result.insertId,
+      message: 'Audit event created successfully'
+    });
+  } catch (error) {
+    console.error('Error creating audit event:', error);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+// Get unique values for filters
+api.get('/audit-events/filters/unique', async (req, res) => {
+  try {
+    const [users] = await pool.execute('SELECT DISTINCT user FROM audit_events ORDER BY user');
+    const [actions] = await pool.execute('SELECT DISTINCT action FROM audit_events ORDER BY action');
+    const [resources] = await pool.execute('SELECT DISTINCT resource FROM audit_events ORDER BY resource');
+    
+    res.json({
+      users: users.map(r => r.user),
+      actions: actions.map(r => r.action),
+      resources: resources.map(r => r.resource)
+    });
+  } catch (error) {
+    console.error('Error fetching filter options:', error);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
 app.use('/api', api);
 
 // Auto-create catalog tables if they don't exist
@@ -4804,8 +6880,7 @@ async function createInventoryTables() {
   }
 }
 
-// Create catalog tables on server start
-createCatalogTables();
+// Table creation moved to initializeTables() function
 
 // Auto-create order tables if they don't exist
 async function createOrderTables() {
@@ -5130,8 +7205,7 @@ async function createOrderTables() {
   }
 }
 
-// Create inventory tables on server start
-createInventoryTables();
+// Table creation moved to initializeTables() function
 
 // Auto-create pricing tables if they don't exist
 async function createPricingTables() {
@@ -5337,11 +7411,1427 @@ async function createPricingTables() {
   }
 }
 
-// Create order tables on server start
-createOrderTables();
+// Table creation moved to initializeTables() function
 
-// Create pricing tables on server start
-createPricingTables();
+// Create payment tables on server start
+async function createPaymentTables() {
+  try {
+    // Read and execute payment schema
+    const fs = await import('fs');
+    const path = await import('path');
+    const { fileURLToPath } = await import('url');
+    const __filename = fileURLToPath(import.meta.url);
+    const __dirname = path.dirname(__filename);
+    
+    const schemaPath = path.join(__dirname, 'schema_payments.sql');
+    if (fs.existsSync(schemaPath)) {
+      const schema = fs.readFileSync(schemaPath, 'utf8');
+      const statements = schema.split(';').filter(s => s.trim().length > 0);
+      
+      for (const statement of statements) {
+        if (statement.trim()) {
+          try {
+            await pool.execute(statement);
+          } catch (error) {
+            if (!error.message.includes('already exists')) {
+              console.error('Error creating payment table:', error.message);
+            }
+          }
+        }
+      }
+      console.log('Payment tables initialized successfully');
+    }
+  } catch (error) {
+    console.error('Error creating payment tables:', error);
+  }
+}
+// Table creation moved to initializeTables() function
+
+// ==================== PAYMENT/FINANCE MODULE API ====================
+
+// Helper function to generate unique payment numbers
+function generatePaymentNumber(prefix = 'PAY') {
+  return `${prefix}-${Date.now()}-${Math.random().toString(36).substr(2, 9).toUpperCase()}`;
+}
+
+function generateInvoiceNumber() {
+  const year = new Date().getFullYear();
+  const month = String(new Date().getMonth() + 1).padStart(2, '0');
+  const random = Math.random().toString(36).substr(2, 6).toUpperCase();
+  return `INV-${year}${month}-${random}`;
+}
+
+function generateRefundNumber() {
+  return `REF-${Date.now()}-${Math.random().toString(36).substr(2, 9).toUpperCase()}`;
+}
+
+// ==================== PAYMENT GATEWAYS ====================
+
+// Get all payment gateways
+api.get('/payment-gateways', async (req, res) => {
+  try {
+    const [rows] = await pool.execute('SELECT id, name, displayName, gatewayType, isActive, isTestMode, supportedPaymentMethods, supportedCurrencies, createdAt, updatedAt FROM payment_gateways ORDER BY name');
+    
+    // Parse JSON fields
+    const parsedRows = rows.map(row => {
+      const item = { ...row };
+      ['supportedPaymentMethods', 'supportedCurrencies'].forEach(field => {
+        if (item[field] && typeof item[field] === 'string') {
+          try {
+            item[field] = JSON.parse(item[field]);
+          } catch (e) {}
+        }
+      });
+      item.isActive = Boolean(item.isActive);
+      item.isTestMode = Boolean(item.isTestMode);
+      return item;
+    });
+    
+    res.json(parsedRows);
+  } catch (error) {
+    // If table doesn't exist, return empty array instead of error
+    if (error.message && error.message.includes("doesn't exist")) {
+      res.json([]);
+    } else {
+      console.error('Error fetching payment gateways:', error);
+      res.status(500).json({ error: 'Database error' });
+    }
+  }
+});
+
+// Get payment gateway by ID
+api.get('/payment-gateways/:id', async (req, res) => {
+  try {
+    const [rows] = await pool.execute('SELECT * FROM payment_gateways WHERE id = ?', [req.params.id]);
+    if (rows.length === 0) return res.status(404).json({ error: 'Payment gateway not found' });
+    
+    const item = rows[0];
+    ['config', 'supportedPaymentMethods', 'supportedCurrencies', 'feeStructure'].forEach(field => {
+      if (item[field] && typeof item[field] === 'string') {
+        try {
+          item[field] = JSON.parse(item[field]);
+        } catch (e) {}
+      }
+    });
+    item.isActive = Boolean(item.isActive);
+    item.isTestMode = Boolean(item.isTestMode);
+    
+    // Don't expose sensitive data in production
+    if (item.apiKey) item.apiKey = '***';
+    if (item.apiSecret) item.apiSecret = '***';
+    if (item.webhookSecret) item.webhookSecret = '***';
+    
+    res.json(item);
+  } catch (error) {
+    console.error('Error fetching payment gateway:', error);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+// Create payment gateway
+api.post('/payment-gateways', async (req, res) => {
+  try {
+    const { name, displayName, gatewayType, isActive, isTestMode, apiKey, apiSecret, webhookSecret, merchantId, config, supportedPaymentMethods, supportedCurrencies, feeStructure } = req.body;
+    
+    const jsonFields = { config, supportedPaymentMethods, supportedCurrencies, feeStructure };
+    const jsonValues = {};
+    Object.keys(jsonFields).forEach(key => {
+      jsonValues[key] = jsonFields[key] ? JSON.stringify(jsonFields[key]) : null;
+    });
+    
+    const [result] = await pool.execute(
+      `INSERT INTO payment_gateways (name, displayName, gatewayType, isActive, isTestMode, apiKey, apiSecret, webhookSecret, merchantId, config, supportedPaymentMethods, supportedCurrencies, feeStructure) 
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [name, displayName, gatewayType, isActive || true, isTestMode || true, apiKey || null, apiSecret || null, webhookSecret || null, merchantId || null, jsonValues.config, jsonValues.supportedPaymentMethods, jsonValues.supportedCurrencies, jsonValues.feeStructure]
+    );
+    
+    const [newItem] = await pool.execute('SELECT * FROM payment_gateways WHERE id = ?', [result.insertId]);
+    const item = newItem[0];
+    ['config', 'supportedPaymentMethods', 'supportedCurrencies', 'feeStructure'].forEach(field => {
+      if (item[field] && typeof item[field] === 'string') {
+        try {
+          item[field] = JSON.parse(item[field]);
+        } catch (e) {}
+      }
+    });
+    item.isActive = Boolean(item.isActive);
+    item.isTestMode = Boolean(item.isTestMode);
+    
+    res.status(201).json(item);
+  } catch (error) {
+    console.error('Error creating payment gateway:', error);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+// Update payment gateway
+api.put('/payment-gateways/:id', async (req, res) => {
+  try {
+    const { displayName, isActive, isTestMode, apiKey, apiSecret, webhookSecret, merchantId, config, supportedPaymentMethods, supportedCurrencies, feeStructure } = req.body;
+    
+    const updates = [];
+    const values = [];
+    
+    if (displayName !== undefined) { updates.push('displayName = ?'); values.push(displayName); }
+    if (isActive !== undefined) { updates.push('isActive = ?'); values.push(isActive); }
+    if (isTestMode !== undefined) { updates.push('isTestMode = ?'); values.push(isTestMode); }
+    if (apiKey !== undefined) { updates.push('apiKey = ?'); values.push(apiKey); }
+    if (apiSecret !== undefined) { updates.push('apiSecret = ?'); values.push(apiSecret); }
+    if (webhookSecret !== undefined) { updates.push('webhookSecret = ?'); values.push(webhookSecret); }
+    if (merchantId !== undefined) { updates.push('merchantId = ?'); values.push(merchantId); }
+    if (config !== undefined) { updates.push('config = ?'); values.push(JSON.stringify(config)); }
+    if (supportedPaymentMethods !== undefined) { updates.push('supportedPaymentMethods = ?'); values.push(JSON.stringify(supportedPaymentMethods)); }
+    if (supportedCurrencies !== undefined) { updates.push('supportedCurrencies = ?'); values.push(JSON.stringify(supportedCurrencies)); }
+    if (feeStructure !== undefined) { updates.push('feeStructure = ?'); values.push(JSON.stringify(feeStructure)); }
+    
+    if (updates.length === 0) {
+      return res.status(400).json({ error: 'No fields to update' });
+    }
+    
+    values.push(req.params.id);
+    await pool.execute(`UPDATE payment_gateways SET ${updates.join(', ')} WHERE id = ?`, values);
+    
+    const [rows] = await pool.execute('SELECT * FROM payment_gateways WHERE id = ?', [req.params.id]);
+    if (rows.length === 0) return res.status(404).json({ error: 'Payment gateway not found' });
+    
+    const item = rows[0];
+    ['config', 'supportedPaymentMethods', 'supportedCurrencies', 'feeStructure'].forEach(field => {
+      if (item[field] && typeof item[field] === 'string') {
+        try {
+          item[field] = JSON.parse(item[field]);
+        } catch (e) {}
+      }
+    });
+    item.isActive = Boolean(item.isActive);
+    item.isTestMode = Boolean(item.isTestMode);
+    
+    res.json(item);
+  } catch (error) {
+    console.error('Error updating payment gateway:', error);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+// Delete payment gateway
+api.delete('/payment-gateways/:id', async (req, res) => {
+  try {
+    const [result] = await pool.execute('DELETE FROM payment_gateways WHERE id = ?', [req.params.id]);
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ error: 'Payment gateway not found' });
+    }
+    res.json({ message: 'Payment gateway deleted successfully' });
+  } catch (error) {
+    console.error('Error deleting payment gateway:', error);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+// ==================== PAYMENT TOKENS ====================
+
+// Get payment tokens for a user
+api.get('/payment-tokens', async (req, res) => {
+  try {
+    const { userId } = req.query;
+    let query = 'SELECT * FROM payment_tokens WHERE 1=1';
+    const params = [];
+    
+    if (userId) {
+      query += ' AND userId = ?';
+      params.push(userId);
+    }
+    
+    query += ' ORDER BY isDefault DESC, createdAt DESC';
+    
+    const [rows] = await pool.execute(query, params);
+    
+    const parsedRows = rows.map(row => {
+      const item = { ...row };
+      if (item.metadata && typeof item.metadata === 'string') {
+        try {
+          item.metadata = JSON.parse(item.metadata);
+        } catch (e) {}
+      }
+      item.isDefault = Boolean(item.isDefault);
+      item.isActive = Boolean(item.isActive);
+      return item;
+    });
+    
+    res.json(parsedRows);
+  } catch (error) {
+    console.error('Error fetching payment tokens:', error);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+// Create payment token (tokenization)
+api.post('/payment-tokens', async (req, res) => {
+  try {
+    const { userId, gatewayId, token, tokenType, maskedCardNumber, cardBrand, expiryMonth, expiryYear, cardHolderName, isDefault, metadata } = req.body;
+    
+    // If setting as default, unset other defaults for this user
+    if (isDefault) {
+      await pool.execute('UPDATE payment_tokens SET isDefault = FALSE WHERE userId = ?', [userId]);
+    }
+    
+    const [result] = await pool.execute(
+      `INSERT INTO payment_tokens (userId, gatewayId, token, tokenType, maskedCardNumber, cardBrand, expiryMonth, expiryYear, cardHolderName, isDefault, metadata) 
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [userId, gatewayId, token, tokenType, maskedCardNumber || null, cardBrand || null, expiryMonth || null, expiryYear || null, cardHolderName || null, isDefault || false, metadata ? JSON.stringify(metadata) : null]
+    );
+    
+    const [newItem] = await pool.execute('SELECT * FROM payment_tokens WHERE id = ?', [result.insertId]);
+    const item = newItem[0];
+    if (item.metadata && typeof item.metadata === 'string') {
+      try {
+        item.metadata = JSON.parse(item.metadata);
+      } catch (e) {}
+    }
+    item.isDefault = Boolean(item.isDefault);
+    item.isActive = Boolean(item.isActive);
+    
+    res.status(201).json(item);
+  } catch (error) {
+    console.error('Error creating payment token:', error);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+// Delete payment token
+api.delete('/payment-tokens/:id', async (req, res) => {
+  try {
+    const [result] = await pool.execute('DELETE FROM payment_tokens WHERE id = ?', [req.params.id]);
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ error: 'Payment token not found' });
+    }
+    res.json({ message: 'Payment token deleted successfully' });
+  } catch (error) {
+    console.error('Error deleting payment token:', error);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+// ==================== PAYMENTS ====================
+
+// Get all payments
+api.get('/payments', async (req, res) => {
+  try {
+    const { userId, orderId, paymentStatus, gatewayId, startDate, endDate } = req.query;
+    let query = `SELECT p.*, pg.name as gatewayName, pg.displayName as gatewayDisplayName 
+                 FROM payments p 
+                 LEFT JOIN payment_gateways pg ON p.gatewayId = pg.id 
+                 WHERE 1=1`;
+    const params = [];
+    
+    if (userId) {
+      query += ' AND p.userId = ?';
+      params.push(userId);
+    }
+    if (orderId) {
+      query += ' AND p.orderId = ?';
+      params.push(orderId);
+    }
+    if (paymentStatus) {
+      query += ' AND p.paymentStatus = ?';
+      params.push(paymentStatus);
+    }
+    if (gatewayId) {
+      query += ' AND p.gatewayId = ?';
+      params.push(gatewayId);
+    }
+    if (startDate) {
+      query += ' AND DATE(p.createdAt) >= ?';
+      params.push(startDate);
+    }
+    if (endDate) {
+      query += ' AND DATE(p.createdAt) <= ?';
+      params.push(endDate);
+    }
+    
+    query += ' ORDER BY p.createdAt DESC';
+    
+    const [rows] = await pool.execute(query, params);
+    
+    const parsedRows = rows.map(row => {
+      const item = { ...row };
+      if (item.metadata && typeof item.metadata === 'string') {
+        try {
+          item.metadata = JSON.parse(item.metadata);
+        } catch (e) {}
+      }
+      return item;
+    });
+    
+    res.json(parsedRows);
+  } catch (error) {
+    // If table doesn't exist, return empty array instead of error
+    if (error.message && error.message.includes("doesn't exist")) {
+      res.json([]);
+    } else {
+      console.error('Error fetching payments:', error);
+      res.status(500).json({ error: 'Database error' });
+    }
+  }
+});
+
+// Get payment by ID
+api.get('/payments/:id', async (req, res) => {
+  try {
+    const [rows] = await pool.execute(
+      `SELECT p.*, pg.name as gatewayName, pg.displayName as gatewayDisplayName 
+       FROM payments p 
+       LEFT JOIN payment_gateways pg ON p.gatewayId = pg.id 
+       WHERE p.id = ?`,
+      [req.params.id]
+    );
+    if (rows.length === 0) return res.status(404).json({ error: 'Payment not found' });
+    
+    const item = rows[0];
+    if (item.metadata && typeof item.metadata === 'string') {
+      try {
+        item.metadata = JSON.parse(item.metadata);
+      } catch (e) {}
+    }
+    
+    res.json(item);
+  } catch (error) {
+    console.error('Error fetching payment:', error);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+// Create payment (initiate payment)
+api.post('/payments', async (req, res) => {
+  try {
+    const { userId, orderId, outstandingId, gatewayId, tokenId, amount, currency, paymentMethod, metadata, ipAddress, userAgent } = req.body;
+    
+    const paymentNumber = generatePaymentNumber();
+    
+    const [result] = await pool.execute(
+      `INSERT INTO payments (paymentNumber, userId, orderId, outstandingId, gatewayId, tokenId, amount, currency, paymentMethod, metadata, ipAddress, userAgent, paymentStatus) 
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')`,
+      [paymentNumber, userId, orderId || null, outstandingId || null, gatewayId || null, tokenId || null, amount, currency || 'INR', paymentMethod, metadata ? JSON.stringify(metadata) : null, ipAddress || null, userAgent || null]
+    );
+    
+    const [newItem] = await pool.execute('SELECT * FROM payments WHERE id = ?', [result.insertId]);
+    const item = newItem[0];
+    if (item.metadata && typeof item.metadata === 'string') {
+      try {
+        item.metadata = JSON.parse(item.metadata);
+      } catch (e) {}
+    }
+    
+    res.status(201).json(item);
+  } catch (error) {
+    console.error('Error creating payment:', error);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+// Update payment status (for gateway callbacks)
+api.put('/payments/:id/status', async (req, res) => {
+  try {
+    const { paymentStatus, gatewayTransactionId, gatewayOrderId, gatewayPaymentId, failureReason, failureCode, metadata } = req.body;
+    
+    const updates = [];
+    const values = [];
+    
+    if (paymentStatus) { updates.push('paymentStatus = ?'); values.push(paymentStatus); }
+    if (gatewayTransactionId) { updates.push('gatewayTransactionId = ?'); values.push(gatewayTransactionId); }
+    if (gatewayOrderId) { updates.push('gatewayOrderId = ?'); values.push(gatewayOrderId); }
+    if (gatewayPaymentId) { updates.push('gatewayPaymentId = ?'); values.push(gatewayPaymentId); }
+    if (failureReason !== undefined) { updates.push('failureReason = ?'); values.push(failureReason); }
+    if (failureCode !== undefined) { updates.push('failureCode = ?'); values.push(failureCode); }
+    if (metadata !== undefined) { updates.push('metadata = ?'); values.push(JSON.stringify(metadata)); }
+    
+    if (updates.length === 0) {
+      return res.status(400).json({ error: 'No fields to update' });
+    }
+    
+    values.push(req.params.id);
+    await pool.execute(`UPDATE payments SET ${updates.join(', ')} WHERE id = ?`, values);
+    
+    const [rows] = await pool.execute('SELECT * FROM payments WHERE id = ?', [req.params.id]);
+    if (rows.length === 0) return res.status(404).json({ error: 'Payment not found' });
+    
+    const item = rows[0];
+    if (item.metadata && typeof item.metadata === 'string') {
+      try {
+        item.metadata = JSON.parse(item.metadata);
+      } catch (e) {}
+    }
+    
+    res.json(item);
+  } catch (error) {
+    console.error('Error updating payment status:', error);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+// ==================== PAYMENT TRANSACTIONS ====================
+
+// Get payment transactions
+api.get('/payment-transactions', async (req, res) => {
+  try {
+    const { paymentId, transactionType, status } = req.query;
+    let query = 'SELECT * FROM payment_transactions WHERE 1=1';
+    const params = [];
+    
+    if (paymentId) {
+      query += ' AND paymentId = ?';
+      params.push(paymentId);
+    }
+    if (transactionType) {
+      query += ' AND transactionType = ?';
+      params.push(transactionType);
+    }
+    if (status) {
+      query += ' AND status = ?';
+      params.push(status);
+    }
+    
+    query += ' ORDER BY createdAt DESC';
+    
+    const [rows] = await pool.execute(query, params);
+    
+    const parsedRows = rows.map(row => {
+      const item = { ...row };
+      if (item.gatewayResponse && typeof item.gatewayResponse === 'string') {
+        try {
+          item.gatewayResponse = JSON.parse(item.gatewayResponse);
+        } catch (e) {}
+      }
+      return item;
+    });
+    
+    res.json(parsedRows);
+  } catch (error) {
+    console.error('Error fetching payment transactions:', error);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+// Create payment transaction
+api.post('/payment-transactions', async (req, res) => {
+  try {
+    const { paymentId, transactionType, amount, currency, gatewayTransactionId, gatewayResponse, status, failureReason, failureCode } = req.body;
+    
+    const [result] = await pool.execute(
+      `INSERT INTO payment_transactions (paymentId, transactionType, amount, currency, gatewayTransactionId, gatewayResponse, status, failureReason, failureCode, processedAt) 
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [paymentId, transactionType, amount, currency || 'INR', gatewayTransactionId || null, gatewayResponse ? JSON.stringify(gatewayResponse) : null, status || 'pending', failureReason || null, failureCode || null, status === 'success' ? new Date() : null]
+    );
+    
+    const [newItem] = await pool.execute('SELECT * FROM payment_transactions WHERE id = ?', [result.insertId]);
+    const item = newItem[0];
+    if (item.gatewayResponse && typeof item.gatewayResponse === 'string') {
+      try {
+        item.gatewayResponse = JSON.parse(item.gatewayResponse);
+      } catch (e) {}
+    }
+    
+    res.status(201).json(item);
+  } catch (error) {
+    console.error('Error creating payment transaction:', error);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+// ==================== REFUNDS ====================
+
+// Get all refunds
+api.get('/refunds', async (req, res) => {
+  try {
+    const { paymentId, orderId, userId, refundStatus, startDate, endDate } = req.query;
+    let query = 'SELECT * FROM refunds WHERE 1=1';
+    const params = [];
+    
+    if (paymentId) {
+      query += ' AND paymentId = ?';
+      params.push(paymentId);
+    }
+    if (orderId) {
+      query += ' AND orderId = ?';
+      params.push(orderId);
+    }
+    if (userId) {
+      query += ' AND userId = ?';
+      params.push(userId);
+    }
+    if (refundStatus) {
+      query += ' AND refundStatus = ?';
+      params.push(refundStatus);
+    }
+    if (startDate) {
+      query += ' AND DATE(createdAt) >= ?';
+      params.push(startDate);
+    }
+    if (endDate) {
+      query += ' AND DATE(createdAt) <= ?';
+      params.push(endDate);
+    }
+    
+    query += ' ORDER BY createdAt DESC';
+    
+    const [rows] = await pool.execute(query, params);
+    
+    const parsedRows = rows.map(row => {
+      const item = { ...row };
+      if (item.gatewayResponse && typeof item.gatewayResponse === 'string') {
+        try {
+          item.gatewayResponse = JSON.parse(item.gatewayResponse);
+        } catch (e) {}
+      }
+      return item;
+    });
+    
+    res.json(parsedRows);
+  } catch (error) {
+    console.error('Error fetching refunds:', error);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+// Create refund
+api.post('/refunds', async (req, res) => {
+  try {
+    const { paymentId, orderId, userId, amount, currency, refundType, refundReason, processedBy } = req.body;
+    
+    // Verify payment exists and get amount
+    const [paymentRows] = await pool.execute('SELECT * FROM payments WHERE id = ?', [paymentId]);
+    if (paymentRows.length === 0) {
+      return res.status(404).json({ error: 'Payment not found' });
+    }
+    
+    const payment = paymentRows[0];
+    const refundAmount = parseFloat(amount);
+    const paymentAmount = parseFloat(payment.amount);
+    
+    if (refundAmount > paymentAmount) {
+      return res.status(400).json({ error: 'Refund amount cannot exceed payment amount' });
+    }
+    
+    const refundNumber = generateRefundNumber();
+    
+    const [result] = await pool.execute(
+      `INSERT INTO refunds (refundNumber, paymentId, orderId, userId, amount, currency, refundType, refundReason, processedBy, refundStatus) 
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')`,
+      [refundNumber, paymentId, orderId || null, userId, refundAmount, currency || 'INR', refundType, refundReason || null, processedBy || null]
+    );
+    
+    // Update payment status if full refund
+    if (refundType === 'full' && refundAmount === paymentAmount) {
+      await pool.execute('UPDATE payments SET paymentStatus = ? WHERE id = ?', ['refunded', paymentId]);
+    }
+    
+    const [newItem] = await pool.execute('SELECT * FROM refunds WHERE id = ?', [result.insertId]);
+    const item = newItem[0];
+    if (item.gatewayResponse && typeof item.gatewayResponse === 'string') {
+      try {
+        item.gatewayResponse = JSON.parse(item.gatewayResponse);
+      } catch (e) {}
+    }
+    
+    res.status(201).json(item);
+  } catch (error) {
+    console.error('Error creating refund:', error);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+// Update refund status
+api.put('/refunds/:id/status', async (req, res) => {
+  try {
+    const { refundStatus, gatewayRefundId, gatewayResponse, failureReason, processedBy } = req.body;
+    
+    const updates = [];
+    const values = [];
+    
+    if (refundStatus) { updates.push('refundStatus = ?'); values.push(refundStatus); }
+    if (gatewayRefundId) { updates.push('gatewayRefundId = ?'); values.push(gatewayRefundId); }
+    if (gatewayResponse !== undefined) { updates.push('gatewayResponse = ?'); values.push(JSON.stringify(gatewayResponse)); }
+    if (failureReason !== undefined) { updates.push('failureReason = ?'); values.push(failureReason); }
+    if (processedBy) { updates.push('processedBy = ?'); values.push(processedBy); }
+    if (refundStatus === 'success') { updates.push('processedAt = NOW()'); }
+    
+    if (updates.length === 0) {
+      return res.status(400).json({ error: 'No fields to update' });
+    }
+    
+    values.push(req.params.id);
+    await pool.execute(`UPDATE refunds SET ${updates.join(', ')} WHERE id = ?`, values);
+    
+    const [rows] = await pool.execute('SELECT * FROM refunds WHERE id = ?', [req.params.id]);
+    if (rows.length === 0) return res.status(404).json({ error: 'Refund not found' });
+    
+    const item = rows[0];
+    if (item.gatewayResponse && typeof item.gatewayResponse === 'string') {
+      try {
+        item.gatewayResponse = JSON.parse(item.gatewayResponse);
+      } catch (e) {}
+    }
+    
+    res.json(item);
+  } catch (error) {
+    console.error('Error updating refund status:', error);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+// ==================== INVOICES ====================
+
+// Get all invoices
+api.get('/invoices', async (req, res) => {
+  try {
+    const { orderId, userId, invoiceStatus, invoiceType, startDate, endDate } = req.query;
+    let query = 'SELECT * FROM invoices WHERE 1=1';
+    const params = [];
+    
+    if (orderId) {
+      query += ' AND orderId = ?';
+      params.push(orderId);
+    }
+    if (userId) {
+      query += ' AND userId = ?';
+      params.push(userId);
+    }
+    if (invoiceStatus) {
+      query += ' AND invoiceStatus = ?';
+      params.push(invoiceStatus);
+    }
+    if (invoiceType) {
+      query += ' AND invoiceType = ?';
+      params.push(invoiceType);
+    }
+    if (startDate) {
+      query += ' AND DATE(invoiceDate) >= ?';
+      params.push(startDate);
+    }
+    if (endDate) {
+      query += ' AND DATE(invoiceDate) <= ?';
+      params.push(endDate);
+    }
+    
+    query += ' ORDER BY invoiceDate DESC, createdAt DESC';
+    
+    const [rows] = await pool.execute(query, params);
+    
+    const parsedRows = rows.map(row => {
+      const item = { ...row };
+      ['items', 'taxDetails'].forEach(field => {
+        if (item[field] && typeof item[field] === 'string') {
+          try {
+            item[field] = JSON.parse(item[field]);
+          } catch (e) {}
+        }
+      });
+      return item;
+    });
+    
+    res.json(parsedRows);
+  } catch (error) {
+    console.error('Error fetching invoices:', error);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+// Get invoice by ID
+api.get('/invoices/:id', async (req, res) => {
+  try {
+    const [rows] = await pool.execute('SELECT * FROM invoices WHERE id = ?', [req.params.id]);
+    if (rows.length === 0) return res.status(404).json({ error: 'Invoice not found' });
+    
+    const item = rows[0];
+    ['items', 'taxDetails'].forEach(field => {
+      if (item[field] && typeof item[field] === 'string') {
+        try {
+          item[field] = JSON.parse(item[field]);
+        } catch (e) {}
+      }
+    });
+    
+    res.json(item);
+  } catch (error) {
+    console.error('Error fetching invoice:', error);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+// Create invoice
+api.post('/invoices', async (req, res) => {
+  try {
+    const { orderId, userId, invoiceType, invoiceDate, dueDate, subtotal, taxAmount, discountAmount, shippingAmount, totalAmount, billingAddress, shippingAddress, items, taxDetails, notes, termsAndConditions } = req.body;
+    
+    const invoiceNumber = generateInvoiceNumber();
+    const balanceAmount = parseFloat(totalAmount) - (parseFloat(req.body.paidAmount) || 0);
+    
+    const [result] = await pool.execute(
+      `INSERT INTO invoices (invoiceNumber, orderId, userId, invoiceType, invoiceDate, dueDate, subtotal, taxAmount, discountAmount, shippingAmount, totalAmount, paidAmount, balanceAmount, billingAddress, shippingAddress, items, taxDetails, notes, termsAndConditions, invoiceStatus) 
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft')`,
+      [
+        invoiceNumber, orderId || null, userId, invoiceType || 'sales', invoiceDate || new Date().toISOString().split('T')[0], 
+        dueDate || null, subtotal || 0, taxAmount || 0, discountAmount || 0, shippingAmount || 0, totalAmount, 
+        req.body.paidAmount || 0, balanceAmount, billingAddress || null, shippingAddress || null,
+        items ? JSON.stringify(items) : null, taxDetails ? JSON.stringify(taxDetails) : null, notes || null, termsAndConditions || null
+      ]
+    );
+    
+    const [newItem] = await pool.execute('SELECT * FROM invoices WHERE id = ?', [result.insertId]);
+    const item = newItem[0];
+    ['items', 'taxDetails'].forEach(field => {
+      if (item[field] && typeof item[field] === 'string') {
+        try {
+          item[field] = JSON.parse(item[field]);
+        } catch (e) {}
+      }
+    });
+    
+    res.status(201).json(item);
+  } catch (error) {
+    console.error('Error creating invoice:', error);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+// Update invoice
+api.put('/invoices/:id', async (req, res) => {
+  try {
+    const { invoiceStatus, paidAmount, notes, pdfPath } = req.body;
+    
+    const updates = [];
+    const values = [];
+    
+    if (invoiceStatus) { updates.push('invoiceStatus = ?'); values.push(invoiceStatus); }
+    if (paidAmount !== undefined) {
+      // Get current invoice to calculate balance
+      const [current] = await pool.execute('SELECT totalAmount, paidAmount FROM invoices WHERE id = ?', [req.params.id]);
+      if (current.length > 0) {
+        const newPaidAmount = parseFloat(paidAmount);
+        const totalAmount = parseFloat(current[0].totalAmount);
+        const balanceAmount = totalAmount - newPaidAmount;
+        updates.push('paidAmount = ?'); values.push(newPaidAmount);
+        updates.push('balanceAmount = ?'); values.push(balanceAmount);
+      }
+    }
+    if (notes !== undefined) { updates.push('notes = ?'); values.push(notes); }
+    if (pdfPath !== undefined) { updates.push('pdfPath = ?'); values.push(pdfPath); }
+    
+    if (updates.length === 0) {
+      return res.status(400).json({ error: 'No fields to update' });
+    }
+    
+    values.push(req.params.id);
+    await pool.execute(`UPDATE invoices SET ${updates.join(', ')} WHERE id = ?`, values);
+    
+    const [rows] = await pool.execute('SELECT * FROM invoices WHERE id = ?', [req.params.id]);
+    if (rows.length === 0) return res.status(404).json({ error: 'Invoice not found' });
+    
+    const item = rows[0];
+    ['items', 'taxDetails'].forEach(field => {
+      if (item[field] && typeof item[field] === 'string') {
+        try {
+          item[field] = JSON.parse(item[field]);
+        } catch (e) {}
+      }
+    });
+    
+    res.json(item);
+  } catch (error) {
+    console.error('Error updating invoice:', error);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+// ==================== RECONCILIATIONS ====================
+
+// Get all reconciliations
+api.get('/reconciliations', async (req, res) => {
+  try {
+    const { gatewayId, reconciliationStatus, startDate, endDate } = req.query;
+    let query = 'SELECT * FROM payment_reconciliations WHERE 1=1';
+    const params = [];
+    
+    if (gatewayId) {
+      query += ' AND gatewayId = ?';
+      params.push(gatewayId);
+    }
+    if (reconciliationStatus) {
+      query += ' AND reconciliationStatus = ?';
+      params.push(reconciliationStatus);
+    }
+    if (startDate) {
+      query += ' AND DATE(reconciliationDate) >= ?';
+      params.push(startDate);
+    }
+    if (endDate) {
+      query += ' AND DATE(reconciliationDate) <= ?';
+      params.push(endDate);
+    }
+    
+    query += ' ORDER BY reconciliationDate DESC, createdAt DESC';
+    
+    const [rows] = await pool.execute(query, params);
+    
+    const parsedRows = rows.map(row => {
+      const item = { ...row };
+      ['gatewayStatement', 'discrepancies'].forEach(field => {
+        if (item[field] && typeof item[field] === 'string') {
+          try {
+            item[field] = JSON.parse(item[field]);
+          } catch (e) {}
+        }
+      });
+      return item;
+    });
+    
+    res.json(parsedRows);
+  } catch (error) {
+    console.error('Error fetching reconciliations:', error);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+// Create reconciliation
+api.post('/reconciliations', async (req, res) => {
+  try {
+    const { gatewayId, reconciliationDate, startDate, endDate, gatewayStatement, reconciledBy } = req.body;
+    
+    const reconciliationNumber = `REC-${Date.now()}-${Math.random().toString(36).substr(2, 9).toUpperCase()}`;
+    
+    // Process gateway statement and match with payments
+    const statement = gatewayStatement || [];
+    let totalTransactions = statement.length;
+    let totalAmount = 0;
+    let matchedTransactions = 0;
+    let matchedAmount = 0;
+    let unmatchedTransactions = 0;
+    let unmatchedAmount = 0;
+    let discrepancyCount = 0;
+    const discrepancies = [];
+    
+    // Get payments in date range
+    const [payments] = await pool.execute(
+      'SELECT * FROM payments WHERE gatewayId = ? AND DATE(createdAt) BETWEEN ? AND ?',
+      [gatewayId, startDate, endDate]
+    );
+    
+    // Match transactions
+    for (const stmtTx of statement) {
+      totalAmount += parseFloat(stmtTx.amount || 0);
+      const matchedPayment = payments.find(p => 
+        p.gatewayTransactionId === stmtTx.transactionId || 
+        p.gatewayPaymentId === stmtTx.paymentId
+      );
+      
+      if (matchedPayment) {
+        matchedTransactions++;
+        matchedAmount += parseFloat(stmtTx.amount || 0);
+        
+        const paymentAmount = parseFloat(matchedPayment.amount);
+        const stmtAmount = parseFloat(stmtTx.amount || 0);
+        
+        if (Math.abs(paymentAmount - stmtAmount) > 0.01) {
+          discrepancyCount++;
+          discrepancies.push({
+            paymentId: matchedPayment.id,
+            gatewayTransactionId: stmtTx.transactionId,
+            paymentAmount,
+            gatewayAmount: stmtAmount,
+            discrepancyAmount: paymentAmount - stmtAmount
+          });
+        }
+      } else {
+        unmatchedTransactions++;
+        unmatchedAmount += parseFloat(stmtTx.amount || 0);
+      }
+    }
+    
+    const [result] = await pool.execute(
+      `INSERT INTO payment_reconciliations (reconciliationNumber, gatewayId, reconciliationDate, startDate, endDate, totalTransactions, totalAmount, matchedTransactions, matchedAmount, unmatchedTransactions, unmatchedAmount, discrepancyCount, gatewayStatement, discrepancies, reconciliationStatus, reconciledBy) 
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)`,
+      [
+        reconciliationNumber, gatewayId, reconciliationDate || new Date().toISOString().split('T')[0], 
+        startDate, endDate, totalTransactions, totalAmount, matchedTransactions, matchedAmount,
+        unmatchedTransactions, unmatchedAmount, discrepancyCount,
+        JSON.stringify(gatewayStatement), JSON.stringify(discrepancies), reconciledBy || null
+      ]
+    );
+    
+    const [newItem] = await pool.execute('SELECT * FROM payment_reconciliations WHERE id = ?', [result.insertId]);
+    const item = newItem[0];
+    ['gatewayStatement', 'discrepancies'].forEach(field => {
+      if (item[field] && typeof item[field] === 'string') {
+        try {
+          item[field] = JSON.parse(item[field]);
+        } catch (e) {}
+      }
+    });
+    
+    res.status(201).json(item);
+  } catch (error) {
+    console.error('Error creating reconciliation:', error);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+// Update reconciliation status
+api.put('/reconciliations/:id/status', async (req, res) => {
+  try {
+    const { reconciliationStatus, notes, reconciledBy } = req.body;
+    
+    const updates = [];
+    const values = [];
+    
+    if (reconciliationStatus) { updates.push('reconciliationStatus = ?'); values.push(reconciliationStatus); }
+    if (notes !== undefined) { updates.push('notes = ?'); values.push(notes); }
+    if (reconciledBy) { updates.push('reconciledBy = ?'); values.push(reconciledBy); }
+    if (reconciliationStatus === 'completed') { updates.push('reconciledAt = NOW()'); }
+    
+    if (updates.length === 0) {
+      return res.status(400).json({ error: 'No fields to update' });
+    }
+    
+    values.push(req.params.id);
+    await pool.execute(`UPDATE payment_reconciliations SET ${updates.join(', ')} WHERE id = ?`, values);
+    
+    const [rows] = await pool.execute('SELECT * FROM payment_reconciliations WHERE id = ?', [req.params.id]);
+    if (rows.length === 0) return res.status(404).json({ error: 'Reconciliation not found' });
+    
+    const item = rows[0];
+    ['gatewayStatement', 'discrepancies'].forEach(field => {
+      if (item[field] && typeof item[field] === 'string') {
+        try {
+          item[field] = JSON.parse(item[field]);
+        } catch (e) {}
+      }
+    });
+    
+    res.json(item);
+  } catch (error) {
+    console.error('Error updating reconciliation:', error);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+// ==================== ACCOUNTING EXPORTS ====================
+
+// Get all accounting exports
+api.get('/accounting-exports', async (req, res) => {
+  try {
+    const { exportType, exportStatus, startDate, endDate } = req.query;
+    let query = 'SELECT * FROM accounting_exports WHERE 1=1';
+    const params = [];
+    
+    if (exportType) {
+      query += ' AND exportType = ?';
+      params.push(exportType);
+    }
+    if (exportStatus) {
+      query += ' AND exportStatus = ?';
+      params.push(exportStatus);
+    }
+    if (startDate) {
+      query += ' AND DATE(createdAt) >= ?';
+      params.push(startDate);
+    }
+    if (endDate) {
+      query += ' AND DATE(createdAt) <= ?';
+      params.push(endDate);
+    }
+    
+    query += ' ORDER BY createdAt DESC';
+    
+    const [rows] = await pool.execute(query, params);
+    
+    const parsedRows = rows.map(row => {
+      const item = { ...row };
+      if (item.filters && typeof item.filters === 'string') {
+        try {
+          item.filters = JSON.parse(item.filters);
+        } catch (e) {}
+      }
+      return item;
+    });
+    
+    res.json(parsedRows);
+  } catch (error) {
+    console.error('Error fetching accounting exports:', error);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+// Create accounting export
+api.post('/accounting-exports', async (req, res) => {
+  try {
+    const { exportType, format, startDate, endDate, filters, exportedBy } = req.body;
+    
+    const exportNumber = `EXP-${Date.now()}-${Math.random().toString(36).substr(2, 9).toUpperCase()}`;
+    
+    const [result] = await pool.execute(
+      `INSERT INTO accounting_exports (exportNumber, exportType, format, startDate, endDate, filters, exportStatus, exportedBy) 
+       VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)`,
+      [exportNumber, exportType, format || 'csv', startDate || null, endDate || null, filters ? JSON.stringify(filters) : null, exportedBy || null]
+    );
+    
+    // In a real implementation, this would trigger an async job to generate the export file
+    // For now, we'll just return the created record
+    
+    const [newItem] = await pool.execute('SELECT * FROM accounting_exports WHERE id = ?', [result.insertId]);
+    const item = newItem[0];
+    if (item.filters && typeof item.filters === 'string') {
+      try {
+        item.filters = JSON.parse(item.filters);
+      } catch (e) {}
+    }
+    
+    res.status(201).json(item);
+  } catch (error) {
+    console.error('Error creating accounting export:', error);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+// Update accounting export status
+api.put('/accounting-exports/:id/status', async (req, res) => {
+  try {
+    const { exportStatus, filePath, fileSize, recordCount, errorMessage } = req.body;
+    
+    const updates = [];
+    const values = [];
+    
+    if (exportStatus) { updates.push('exportStatus = ?'); values.push(exportStatus); }
+    if (filePath) { updates.push('filePath = ?'); values.push(filePath); }
+    if (fileSize !== undefined) { updates.push('fileSize = ?'); values.push(fileSize); }
+    if (recordCount !== undefined) { updates.push('recordCount = ?'); values.push(recordCount); }
+    if (errorMessage !== undefined) { updates.push('errorMessage = ?'); values.push(errorMessage); }
+    if (exportStatus === 'completed' || exportStatus === 'failed') { updates.push('completedAt = NOW()'); }
+    
+    if (updates.length === 0) {
+      return res.status(400).json({ error: 'No fields to update' });
+    }
+    
+    values.push(req.params.id);
+    await pool.execute(`UPDATE accounting_exports SET ${updates.join(', ')} WHERE id = ?`, values);
+    
+    const [rows] = await pool.execute('SELECT * FROM accounting_exports WHERE id = ?', [req.params.id]);
+    if (rows.length === 0) return res.status(404).json({ error: 'Accounting export not found' });
+    
+    const item = rows[0];
+    if (item.filters && typeof item.filters === 'string') {
+      try {
+        item.filters = JSON.parse(item.filters);
+      } catch (e) {}
+    }
+    
+    res.json(item);
+  } catch (error) {
+    console.error('Error updating accounting export:', error);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+// ==================== PAYMENT WEBHOOKS ====================
+
+// Get payment webhooks
+api.get('/payment-webhooks', async (req, res) => {
+  try {
+    const { gatewayId, eventType, isProcessed } = req.query;
+    let query = 'SELECT * FROM payment_webhooks WHERE 1=1';
+    const params = [];
+    
+    if (gatewayId) {
+      query += ' AND gatewayId = ?';
+      params.push(gatewayId);
+    }
+    if (eventType) {
+      query += ' AND eventType = ?';
+      params.push(eventType);
+    }
+    if (isProcessed !== undefined) {
+      query += ' AND isProcessed = ?';
+      params.push(isProcessed === 'true' ? 1 : 0);
+    }
+    
+    query += ' ORDER BY createdAt DESC';
+    
+    const [rows] = await pool.execute(query, params);
+    
+    const parsedRows = rows.map(row => {
+      const item = { ...row };
+      if (item.payload && typeof item.payload === 'string') {
+        try {
+          item.payload = JSON.parse(item.payload);
+        } catch (e) {}
+      }
+      item.isVerified = Boolean(item.isVerified);
+      item.isProcessed = Boolean(item.isProcessed);
+      return item;
+    });
+    
+    res.json(parsedRows);
+  } catch (error) {
+    console.error('Error fetching payment webhooks:', error);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+// Create payment webhook (for gateway callbacks)
+api.post('/payment-webhooks', async (req, res) => {
+  try {
+    const { gatewayId, eventType, webhookId, payload, signature } = req.body;
+    
+    // In production, verify webhook signature here
+    
+    const [result] = await pool.execute(
+      `INSERT INTO payment_webhooks (gatewayId, eventType, webhookId, payload, signature, isVerified) 
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      [gatewayId, eventType, webhookId || null, JSON.stringify(payload), signature || null, true] // Set to true after verification
+    );
+    
+    // Process webhook based on event type
+    // This would typically be done asynchronously
+    if (eventType === 'payment.success' || eventType === 'payment.failed') {
+      // Update payment status
+      const paymentId = payload.payment?.id || payload.entity?.id;
+      if (paymentId) {
+        const paymentStatus = eventType.includes('success') ? 'success' : 'failed';
+        await pool.execute(
+          'UPDATE payments SET paymentStatus = ?, gatewayTransactionId = ?, gatewayPaymentId = ?, metadata = ? WHERE gatewayPaymentId = ? OR gatewayTransactionId = ?',
+          [paymentStatus, payload.entity?.id || null, payload.entity?.id || null, JSON.stringify(payload), paymentId, paymentId]
+        );
+      }
+    }
+    
+    // Mark as processed
+    await pool.execute('UPDATE payment_webhooks SET isProcessed = TRUE, processedAt = NOW() WHERE id = ?', [result.insertId]);
+    
+    const [newItem] = await pool.execute('SELECT * FROM payment_webhooks WHERE id = ?', [result.insertId]);
+    const item = newItem[0];
+    if (item.payload && typeof item.payload === 'string') {
+      try {
+        item.payload = JSON.parse(item.payload);
+      } catch (e) {}
+    }
+    item.isVerified = Boolean(item.isVerified);
+    item.isProcessed = Boolean(item.isProcessed);
+    
+    res.status(201).json(item);
+  } catch (error) {
+    console.error('Error creating payment webhook:', error);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+// ==================== PAYMENT STATISTICS ====================
+
+// Get payment statistics
+api.get('/payments/statistics', async (req, res) => {
+  try {
+    const { startDate, endDate, gatewayId } = req.query;
+    let query = `SELECT 
+      COUNT(*) as totalPayments,
+      SUM(CASE WHEN paymentStatus = 'success' THEN 1 ELSE 0 END) as successfulPayments,
+      SUM(CASE WHEN paymentStatus = 'failed' THEN 1 ELSE 0 END) as failedPayments,
+      SUM(CASE WHEN paymentStatus = 'pending' THEN 1 ELSE 0 END) as pendingPayments,
+      SUM(CASE WHEN paymentStatus = 'success' THEN amount ELSE 0 END) as totalAmount,
+      SUM(CASE WHEN paymentStatus = 'success' THEN amount ELSE 0 END) / NULLIF(COUNT(CASE WHEN paymentStatus = 'success' THEN 1 END), 0) as averageAmount,
+      SUM(CASE WHEN paymentMethod = 'card' THEN 1 ELSE 0 END) as cardPayments,
+      SUM(CASE WHEN paymentMethod = 'upi' THEN 1 ELSE 0 END) as upiPayments,
+      SUM(CASE WHEN paymentMethod = 'netbanking' THEN 1 ELSE 0 END) as netbankingPayments
+    FROM payments WHERE 1=1`;
+    const params = [];
+    
+    if (startDate) {
+      query += ' AND DATE(createdAt) >= ?';
+      params.push(startDate);
+    }
+    if (endDate) {
+      query += ' AND DATE(createdAt) <= ?';
+      params.push(endDate);
+    }
+    if (gatewayId) {
+      query += ' AND gatewayId = ?';
+      params.push(gatewayId);
+    }
+    
+    const [rows] = await pool.execute(query, params);
+    res.json(rows[0] || {});
+  } catch (error) {
+    // If table doesn't exist, return empty statistics instead of error
+    if (error.message && error.message.includes("doesn't exist")) {
+      res.json({});
+    } else {
+      console.error('Error fetching payment statistics:', error);
+      res.status(500).json({ error: 'Database error' });
+    }
+  }
+});
+
+// Auto-create shipment tables if they don't exist
+async function createShipmentTables() {
+  try {
+    // Create shipments table
+    await pool.execute(`
+      CREATE TABLE IF NOT EXISTS shipments (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        orderId INT NOT NULL,
+        shipmentNumber VARCHAR(100) UNIQUE NOT NULL,
+        logisticsPartner VARCHAR(50) NOT NULL,
+        trackingNumber VARCHAR(255),
+        status VARCHAR(50) DEFAULT 'pending',
+        labelUrl TEXT,
+        labelData JSON,
+        originAddress JSON NOT NULL,
+        destinationAddress JSON NOT NULL,
+        weight DECIMAL(10, 2),
+        dimensions JSON,
+        shippingCost DECIMAL(10, 2),
+        estimatedDeliveryDate DATE,
+        actualDeliveryDate DATE,
+        notes TEXT,
+        partnerApiResponse JSON,
+        createdAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updatedAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        INDEX idx_orderId (orderId),
+        INDEX idx_shipmentNumber (shipmentNumber),
+        INDEX idx_trackingNumber (trackingNumber),
+        INDEX idx_status (status),
+        INDEX idx_logisticsPartner (logisticsPartner),
+        INDEX idx_createdAt (createdAt)
+      )
+    `);
+
+    // Create shipment_tracking table
+    await pool.execute(`
+      CREATE TABLE IF NOT EXISTS shipment_tracking (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        shipmentId INT NOT NULL,
+        status VARCHAR(50) NOT NULL,
+        location VARCHAR(255),
+        description TEXT,
+        timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        source VARCHAR(50) DEFAULT 'system',
+        metadata JSON,
+        INDEX idx_shipmentId (shipmentId),
+        INDEX idx_timestamp (timestamp),
+        INDEX idx_status (status)
+      )
+    `);
+
+    // Create logistics_partners table
+    await pool.execute(`
+      CREATE TABLE IF NOT EXISTS logistics_partners (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        name VARCHAR(100) NOT NULL UNIQUE,
+        displayName VARCHAR(255) NOT NULL,
+        isActive BOOLEAN DEFAULT TRUE,
+        apiEndpoint VARCHAR(500),
+        apiKey VARCHAR(255),
+        apiSecret VARCHAR(255),
+        config JSON,
+        createdAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updatedAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        INDEX idx_name (name),
+        INDEX idx_isActive (isActive)
+      )
+    `);
+
+    // Insert default logistics partners if they don't exist
+    await pool.execute(`
+      INSERT IGNORE INTO logistics_partners (name, displayName, isActive, config) VALUES
+      ('shadow', 'Shadow Logistics', TRUE, '{"baseUrl": "https://api.shadowlogistics.com", "webhookUrl": "", "autoTracking": true}'),
+      ('dhl', 'DHL Express', FALSE, '{"baseUrl": "https://api.dhl.com", "webhookUrl": "", "autoTracking": true}'),
+      ('delhivery', 'Delhivery', FALSE, '{"baseUrl": "https://api.delhivery.com", "webhookUrl": "", "autoTracking": true}')
+    `);
+
+    console.log('Shipment tables created/verified successfully');
+  } catch (error) {
+    console.error('Error creating shipment tables:', error);
+  }
+}
+
+// Auto-create analytics tables if they don't exist
+async function createAnalyticsTables() {
+  try {
+    // Create analytics_events table
+    await pool.execute(`
+      CREATE TABLE IF NOT EXISTS analytics_events (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        eventType VARCHAR(100) NOT NULL,
+        entityType VARCHAR(50),
+        entityId INT,
+        userId VARCHAR(100),
+        properties JSON,
+        timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        INDEX idx_eventType (eventType),
+        INDEX idx_entityType (entityType),
+        INDEX idx_entityId (entityId),
+        INDEX idx_userId (userId),
+        INDEX idx_timestamp (timestamp)
+      )
+    `);
+
+    // Create analytics_metrics table
+    await pool.execute(`
+      CREATE TABLE IF NOT EXISTS analytics_metrics (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        metricType VARCHAR(100) NOT NULL,
+        metricKey VARCHAR(255) NOT NULL,
+        metricValue DECIMAL(15, 2),
+        metricData JSON,
+        periodStart DATE,
+        periodEnd DATE,
+        computedAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updatedAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        UNIQUE KEY unique_metric (metricType, metricKey),
+        INDEX idx_metricType (metricType),
+        INDEX idx_periodStart (periodStart),
+        INDEX idx_periodEnd (periodEnd),
+        INDEX idx_computedAt (computedAt)
+      )
+    `);
+
+    // Create analytics_dashboards table
+    await pool.execute(`
+      CREATE TABLE IF NOT EXISTS analytics_dashboards (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        name VARCHAR(255) NOT NULL,
+        description TEXT,
+        config JSON NOT NULL,
+        isDefault BOOLEAN DEFAULT FALSE,
+        createdAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updatedAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        INDEX idx_isDefault (isDefault)
+      )
+    `);
+
+    // Insert default dashboards if they don't exist
+    await pool.execute(`
+      INSERT IGNORE INTO analytics_dashboards (name, description, config, isDefault) VALUES
+      ('Sales Dashboard', 'Overview of sales performance', '{"widgets": ["sales_overview", "sales_trend", "top_products", "sales_by_category"]}', TRUE),
+      ('Inventory Dashboard', 'Inventory turnover and stock levels', '{"widgets": ["inventory_turnover", "stock_levels", "low_stock_alerts", "inventory_value"]}', FALSE),
+      ('Orders Dashboard', 'Pending and completed orders analysis', '{"widgets": ["pending_orders", "order_status", "order_trend", "average_order_value"]}', FALSE),
+      ('Receivables Dashboard', 'Aging receivables and payment tracking', '{"widgets": ["aging_receivables", "payment_status", "collection_trend", "outstanding_summary"]}', FALSE)
+    `);
+
+    console.log('Analytics tables created/verified successfully');
+  } catch (error) {
+    console.error('Error creating analytics tables:', error);
+  }
+}
+
+// Initialize all tables on server start
+async function initializeTables() {
+  await createCatalogTables();
+  await createInventoryTables();
+  await createOrderTables();
+  await createPricingTables();
+  await createPaymentTables();
+  await createShipmentTables();
+  await createAnalyticsTables();
+}
+
+// Initialize tables
+initializeTables().catch(console.error);
 
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`Scanxo API running on http://localhost:${PORT}`);

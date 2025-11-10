@@ -18,6 +18,11 @@ import {
   BuildingStorefrontIcon,
   ShoppingCartIcon,
   CurrencyDollarIcon,
+  CreditCardIcon,
+  TruckIcon,
+  ChartBarIcon,
+  ClipboardDocumentListIcon,
+  DocumentTextIcon,
 } from '@heroicons/react/24/outline';
 
 const Layout = ({ setIsAuthenticated }) => {
@@ -47,6 +52,11 @@ const Layout = ({ setIsAuthenticated }) => {
     { name: 'Outstanding', href: '/outstanding', icon: ReceiptPercentIcon },
     { name: 'KYC Verification', href: '/kyc', icon: ShieldCheckIcon },
     { name: 'Pricing / Scheme', href: '/pricing', icon: CurrencyDollarIcon },
+    { name: 'Payment / Finance', href: '/payments', icon: CreditCardIcon },
+    { name: 'Delivery / Logistics', href: '/delivery', icon: TruckIcon },
+    { name: 'Analytics / BI', href: '/analytics', icon: ChartBarIcon },
+    { name: 'Audit / Events', href: '/audit-events', icon: ClipboardDocumentListIcon },
+    { name: 'Compliance / Reports', href: '/compliance', icon: DocumentTextIcon },
     { name: 'Settings', href: '/settings', icon: Cog6ToothIcon },
   ];
 
